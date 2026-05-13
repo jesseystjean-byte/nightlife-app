@@ -1,0 +1,16 @@
+{
+    "name": "nightlife-app",
+    "version": "1.0.0",
+    "description": "NiGHTlife App - Vercel API proxy for Claude AI",
+    "private": true,
+    "scripts": {
+          "build": "tsc"
+    },
+    "dependencies": {
+          "@vercel/node": "^3.0.0"
+    },
+    "devDependencies": {
+          "typescript": "^5.0.0",
+          "@types/node": "^20.0.0"
+    }
+}
