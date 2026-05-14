@@ -1,7 +1,7 @@
 import type { IncomingMessage, ServerResponse } from 'http';
 
 const ANTHROPIC_API_URL = 'https://api.anthropic.com/v1/messages';
-const MODEL = 'claude-sonnet-4-20250514';
+const MODEL = 'claude-sonnet-4-5';
 const MAX_TOKENS = 1024;
 
 export default async function handler(req: IncomingMessage & { body?: any }, res: ServerResponse) {
