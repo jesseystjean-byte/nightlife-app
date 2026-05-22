@@ -1,0 +1,227 @@
+// api/townie.ts
+// Vercel Serverless Function. Aggregates events from licensed sources (Eventbrite, Ticketmaster, SeatGeek, Google Places),
+// then asks Claude to rank and explain matches for the user's profile.
+//
+// Required env vars in Vercel:
+//   ANTHROPIC_API_KEY       (required)
+//   EVENTBRITE_TOKEN        (optional — leave blank to skip)
+//   TICKETMASTER_KEY        (optional)
+//   SEATGEEK_CLIENT_ID      (optional)
+//   GOOGLE_PLACES_KEY       (optional)
+//
+// POST body: { profile: {...}, location: { lat, lng, city }, query?: string }
+// Response: { events: [...], summary: string }
+
+type Profile = {
+  name?: string; birthYear?: number; gender?: string;
+  city?: string; maxDistanceKm?: number;
+  interests?: string[]; vibes?: string[]; priceRange?: string;
+  daysAvailable?: string[]; timesOfDay?: string[];
+  setting?: string; company?: string; crowdSize?: string;
+  accessibility?: string[];
+};
+
+type EventItem = {
+  id: string; source: string; title: string;
+  startsAt: string; endsAt?: string;
+  venue?: string; city?: string; lat?: number; lng?: number;
+  url?: string; image?: string;
+  price?: { min?: number; max?: number; currency?: string; free?: boolean };
+  categories?: string[]; description?: string;
+};
+
+async function safeFetch(url: string, opts?: any): Promise<any> {
+  try {
+    const r = await fetch(url, opts);
+    if (!r.ok) return null;
+    return await r.json();
+  } catch { return null; }
+}
+
+async function fromEventbrite(lat: number, lng: number, withinKm: number): Promise<EventItem[]> {
+  const token = process.env.EVENTBRITE_TOKEN;
+  if (!token) return [];
+  // Eventbrite public search endpoint
+  const url = `https://www.eventbriteapi.com/v3/events/search/?location.latitude=${lat}&location.longitude=${lng}&location.within=${withinKm}km&expand=venue,ticket_availability&token=${token}`;
+  const data = await safeFetch(url);
+  if (!data?.events) return [];
+  return data.events.slice(0, 30).map((e: any): EventItem => ({
+    id: 'eb_' + e.id,
+    source: 'eventbrite',
+    title: e.name?.text || 'Event',
+    startsAt: e.start?.utc,
+    endsAt: e.end?.utc,
+    venue: e.venue?.name,
+    city: e.venue?.address?.city,
+    lat: e.venue?.latitude ? parseFloat(e.venue.latitude) : undefined,
+    lng: e.venue?.longitude ? parseFloat(e.venue.longitude) : undefined,
+    url: e.url,
+    image: e.logo?.url,
+    price: e.is_free ? { free: true } : undefined,
+    description: e.description?.text?.slice(0, 400),
+  }));
+}
+
+async function fromTicketmaster(lat: number, lng: number, withinKm: number): Promise<EventItem[]> {
+  const key = process.env.TICKETMASTER_KEY;
+  if (!key) return [];
+  const url = `https://app.ticketmaster.com/discovery/v2/events.json?latlong=${lat},${lng}&radius=${Math.round(withinKm * 0.621)}&unit=miles&size=30&apikey=${key}`;
+  const data = await safeFetch(url);
+  const events = data?._embedded?.events || [];
+  return events.map((e: any): EventItem => ({
+    id: 'tm_' + e.id,
+    source: 'ticketmaster',
+    title: e.name,
+    startsAt: e.dates?.start?.dateTime || e.dates?.start?.localDate,
+    venue: e._embedded?.venues?.[0]?.name,
+    city: e._embedded?.venues?.[0]?.city?.name,
+    lat: e._embedded?.venues?.[0]?.location?.latitude ? parseFloat(e._embedded.venues[0].location.latitude) : undefined,
+    lng: e._embedded?.venues?.[0]?.location?.longitude ? parseFloat(e._embedded.venues[0].location.longitude) : undefined,
+    url: e.url,
+    image: e.images?.[0]?.url,
+    price: e.priceRanges?.[0] ? { min: e.priceRanges[0].min, max: e.priceRanges[0].max, currency: e.priceRanges[0].currency } : undefined,
+    categories: e.classifications?.map((c: any) => c.segment?.name).filter(Boolean),
+    description: e.info || e.pleaseNote,
+  }));
+}
+
+async function fromSeatGeek(lat: number, lng: number, withinKm: number): Promise<EventItem[]> {
+  const id = process.env.SEATGEEK_CLIENT_ID;
+  if (!id) return [];
+  const url = `https://api.seatgeek.com/2/events?lat=${lat}&lon=${lng}&range=${Math.round(withinKm * 0.621)}mi&per_page=30&client_id=${id}`;
+  const data = await safeFetch(url);
+  const events = data?.events || [];
+  return events.map((e: any): EventItem => ({
+    id: 'sg_' + e.id,
+    source: 'seatgeek',
+    title: e.title,
+    startsAt: e.datetime_utc,
+    venue: e.venue?.name,
+    city: e.venue?.city,
+    lat: e.venue?.location?.lat,
+    lng: e.venue?.location?.lon,
+    url: e.url,
+    image: e.performers?.[0]?.image,
+    price: e.stats ? { min: e.stats.lowest_price, max: e.stats.highest_price, currency: 'USD' } : undefined,
+    categories: [e.type].filter(Boolean),
+    description: e.short_title,
+  }));
+}
+
+async function fromGooglePlaces(lat: number, lng: number, withinKm: number): Promise<EventItem[]> {
+  const key = process.env.GOOGLE_PLACES_KEY;
+  if (!key) return [];
+  // Nearby search for bars/clubs/restaurants — adds "what's open now" venue suggestions
+  const radius = Math.min(Math.round(withinKm * 1000), 50000);
+  const url = `https://maps.googleapis.com/maps/api/place/nearbysearch/json?location=${lat},${lng}&radius=${radius}&type=night_club&opennow=true&key=${key}`;
+  const data = await safeFetch(url);
+  const places = data?.results || [];
+  return places.slice(0, 15).map((p: any): EventItem => ({
+    id: 'gp_' + p.place_id,
+    source: 'google_places',
+    title: p.name,
+    startsAt: new Date().toISOString(),
+    venue: p.name,
+    city: p.vicinity,
+    lat: p.geometry?.location?.lat,
+    lng: p.geometry?.location?.lng,
+    url: `https://www.google.com/maps/place/?q=place_id:${p.place_id}`,
+    image: p.photos?.[0] ? `https://maps.googleapis.com/maps/api/place/photo?maxwidth=600&photoreference=${p.photos[0].photo_reference}&key=${key}` : undefined,
+    categories: p.types,
+    description: `Open now • Rating: ${p.rating || 'N/A'} (${p.user_ratings_total || 0} reviews)`,
+  }));
+}
+
+async function curateWithClaude(profile: Profile, events: EventItem[], query?: string): Promise<{ ranked: EventItem[]; summary: string }> {
+  const key = process.env.ANTHROPIC_API_KEY;
+  if (!key || events.length === 0) return { ranked: events, summary: '' };
+  
+  const compact = events.map(e => ({
+    id: e.id, title: e.title, venue: e.venue, city: e.city,
+    startsAt: e.startsAt, categories: e.categories,
+    price: e.price, description: e.description?.slice(0, 200),
+  }));
+  
+  const prompt = `You are 5to9's event curator. Rank these events for this user and give a short personal note for each.
+USER PROFILE: ${JSON.stringify(profile)}
+USER QUERY: ${query || '(none)'}
+EVENTS: ${JSON.stringify(compact)}
+
+Reply ONLY with JSON of shape: { "summary": "1-2 sentence vibe summary", "ranked": [{ "id": "...", "score": 0-100, "why": "personal note 1 sentence" }, ...] }
+Top 20 only. Score by interest match, vibe fit, time/day fit, price fit.`;
+
+  try {
+    const r = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'x-api-key': key,
+        'anthropic-version': '2023-06-01',
+      },
+      body: JSON.stringify({
+        model: 'claude-3-5-sonnet-20241022',
+        max_tokens: 2000,
+        messages: [{ role: 'user', content: prompt }],
+      }),
+    });
+    if (!r.ok) return { ranked: events, summary: '' };
+    const data = await r.json();
+    const text = data?.content?.[0]?.text || '';
+    const jsonStart = text.indexOf('{');
+    const jsonEnd = text.lastIndexOf('}');
+    if (jsonStart < 0 || jsonEnd < 0) return { ranked: events, summary: '' };
+    const parsed = JSON.parse(text.slice(jsonStart, jsonEnd + 1));
+    const scoreById: Record<string, { score: number; why: string }> = {};
+    for (const r of (parsed.ranked || [])) {
+      scoreById[r.id] = { score: r.score, why: r.why };
+    }
+    const ranked = events
+      .map(e => ({ ...e, _score: scoreById[e.id]?.score ?? 0, description: scoreById[e.id]?.why || e.description }))
+      .sort((a, b) => (b as any)._score - (a as any)._score);
+    return { ranked, summary: parsed.summary || '' };
+  } catch {
+    return { ranked: events, summary: '' };
+  }
+}
+
+export default async function handler(req: any, res: any) {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+  if (req.method === 'OPTIONS') { res.status(200).end(); return; }
+  if (req.method !== 'POST') { res.status(405).json({ error: 'POST only' }); return; }
+  
+  try {
+    const body = typeof req.body === 'string' ? JSON.parse(req.body) : (req.body || {});
+    const profile: Profile = body.profile || {};
+    const lat = body.location?.lat ?? 40.7128;
+    const lng = body.location?.lng ?? -74.0060;
+    const withinKm = profile.maxDistanceKm || 25;
+    const query: string | undefined = body.query;
+    
+    const [eb, tm, sg, gp] = await Promise.all([
+      fromEventbrite(lat, lng, withinKm),
+      fromTicketmaster(lat, lng, withinKm),
+      fromSeatGeek(lat, lng, withinKm),
+      fromGooglePlaces(lat, lng, withinKm),
+    ]);
+    
+    const seen = new Set<string>();
+    const merged = [...eb, ...tm, ...sg, ...gp].filter(e => {
+      const k = (e.title || '') + '|' + (e.startsAt || '');
+      if (seen.has(k)) return false;
+      seen.add(k);
+      return true;
+    });
+    
+    const { ranked, summary } = await curateWithClaude(profile, merged, query);
+    
+    res.status(200).json({
+      events: ranked.slice(0, 50),
+      summary,
+      sources: { eventbrite: eb.length, ticketmaster: tm.length, seatgeek: sg.length, googlePlaces: gp.length },
+    });
+  } catch (err: any) {
+    res.status(500).json({ error: err?.message || 'server error' });
+  }
+}
