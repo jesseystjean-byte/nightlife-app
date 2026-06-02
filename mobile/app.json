@@ -16,7 +16,7 @@
     ],
     "ios": {
       "supportsTablet": false,
-      "bundleIdentifier": "com.jesseystjean.fivetonine",
+      "bundleIdentifier": "com.nightlife.social.nightlifeapp",
       "buildNumber": "1",
       "infoPlist": {
         "NSLocationWhenInUseUsageDescription": "5to9 uses your location to find events near you.",
@@ -28,7 +28,7 @@
         "foregroundImage": "./adaptive-icon.png",
         "backgroundColor": "#0B0B0F"
       },
-      "package": "com.jesseystjean.fivetonine",
+      "package": "com.nightlife.social.nightlifeapp",
       "versionCode": 1,
       "permissions": [
         "ACCESS_FINE_LOCATION",
