@@ -12,6 +12,8 @@
 // POST body: { profile: {...}, location: { lat, lng, city }, query?: string }
 // Response: { events: [...], summary: string }
 
+import { kvGet } from './_store';
+
 type Profile = {
   name?: string; birthYear?: number; gender?: string;
   city?: string; maxDistanceKm?: number;
@@ -215,11 +217,23 @@ export default async function handler(req: any, res: any) {
     });
     
     const { ranked, summary } = await curateWithClaude(profile, merged, query);
-    
+
+    // Paid/featured events (vendors who paid via PayPal) ride at the top of the feed.
+    let featured: EventItem[] = [];
+    try {
+      const now = Date.now();
+      featured = ((await kvGet<EventItem[]>('featured_events')) || []).filter((e: any) => {
+        const t = Date.parse(e.startsAt || '');
+        return isNaN(t) || t > now - 24 * 3600 * 1000;
+      });
+    } catch {}
+    const featuredIds = new Set(featured.map(e => e.id));
+    const finalEvents = [...featured, ...ranked.filter(e => !featuredIds.has(e.id))].slice(0, 60);
+
     res.status(200).json({
-      events: ranked.slice(0, 50),
+      events: finalEvents,
       summary,
-      sources: { eventbrite: eb.length, ticketmaster: tm.length, seatgeek: sg.length, googlePlaces: gp.length },
+      sources: { eventbrite: eb.length, ticketmaster: tm.length, seatgeek: sg.length, googlePlaces: gp.length, featured: featured.length },
     });
   } catch (err: any) {
     res.status(500).json({ error: err?.message || 'server error' });
