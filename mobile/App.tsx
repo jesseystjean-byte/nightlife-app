@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { SafeAreaView, View, Text, TextInput, TouchableOpacity, ScrollView, FlatList, Image, ActivityIndicator, StyleSheet, Modal, Platform, KeyboardAvoidingView, Switch } from 'react-native';
+import { SafeAreaView, View, Text, TextInput, TouchableOpacity, ScrollView, FlatList, Image, ActivityIndicator, StyleSheet, Modal, Platform, KeyboardAvoidingView, Switch, Linking } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as Location from 'expo-location';
 import { StatusBar } from 'expo-status-bar';
@@ -15,6 +15,29 @@ const LINE = '#222229';
 const PROFILE_KEY = '@5to9_profile_v1';
 const SAVED_KEY = '@5to9_saved_v1';
 const PASSED_KEY = '@5to9_passed_v1';
+const FRIENDS_KEY = '@5to9_friends_v1';
+const IMPORTED_KEY = '@5to9_imported_v1';
+const USER_KEY = '@5to9_user_v1';
+
+// Login-free identity: a stable device userId + a shareable invite code (registered on the backend).
+async function ensureIdentity(profile?: any){
+  let stored: any = null;
+  try { const raw = await AsyncStorage.getItem(USER_KEY); stored = raw ? JSON.parse(raw) : null; } catch {}
+  let userId = stored?.userId;
+  if (!userId) {
+    userId = 'u_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+    await AsyncStorage.setItem(USER_KEY, JSON.stringify({ userId }));
+  }
+  try {
+    const r = await fetch(API_BASE + '/api/friends', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ action: 'register', userId, name: profile?.name || '', city: profile?.city || '', vibes: profile?.vibes || [] }),
+    });
+    const d = await r.json();
+    if (d.user) { await AsyncStorage.setItem(USER_KEY, JSON.stringify({ userId, code: d.user.code })); return d.user; }
+  } catch {}
+  return { userId, code: stored?.code };
+}
 
 const INTERESTS = ['Live music','DJs / Electronic','Hip-hop','Indie','Jazz','Latin','House','Techno','Comedy','Theater','Art / Gallery','Film','Food / Tasting','Cocktails','Wine','Beer / Brewery','Dance','Karaoke','Trivia','Sports','Outdoor','Festival','Workshop','Meetup','LGBTQ+','Date night','After hours'];
 const VIBES = ['Chill','Energetic','Romantic','Wild','Classy','Underground','Trendy','Cozy','Loud','Intimate'];
@@ -233,10 +256,16 @@ function Onboarding({ onDone }: { onDone: (p: Profile) => void }){
 }
 
 // ---------- Cards & Lists ----------
-function EventCard({ ev, onOpen, onSave }: any){
+function EventCard({ ev, onOpen, onSave, rank, saved }: any){
   return (
     <TouchableOpacity activeOpacity={0.9} onPress={onOpen} style={s.card}>
-      {ev.image ? <Image source={{uri: ev.image}} style={s.cardImg}/> : <View style={[s.cardImg, {backgroundColor:'#222'}]}/>}
+      <View>
+        {ev.image
+          ? <Image source={{uri: ev.image}} style={s.cardImg}/>
+          : <View style={[s.cardImg, s.cardImgFallback]}><Text style={s.cardImgFallbackTxt}>{(ev.title||'5to9')[0].toUpperCase()}</Text></View>}
+        {rank ? <View style={s.rankBadge}><Text style={s.rankTxt}>#{rank} nearby</Text></View> : null}
+        <TouchableOpacity onPress={onSave} style={s.heartOverlay}><Text style={s.heartOverlayTxt}>{saved ? '♥' : '♡'}</Text></TouchableOpacity>
+      </View>
       <View style={s.cardBody}>
         <View style={s.row}>
           {ev.source ? <View style={s.tag}><Text style={s.tagTxt}>{ev.source.replace('_',' ')}</Text></View> : null}
@@ -279,16 +308,54 @@ function EventDetail({ ev, visible, onClose, onSave }: any){
   );
 }
 
+// ---------- Import event from a link (compliant: oEmbed + link unfurl) ----------
+function ImportLinkModal({ visible, onClose, onImported }: any){
+  const [url, setUrl] = useState('');
+  const [loading, setLoading] = useState(false);
+  const [err, setErr] = useState('');
+  async function go(){
+    if (!/^https?:\/\//i.test(url)) { setErr('Paste a full link starting with https://'); return; }
+    setErr(''); setLoading(true);
+    try {
+      const r = await fetch(API_BASE + '/api/import', { method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify({ url }) });
+      const data = await r.json();
+      if (data.event) { onImported(data.event); setUrl(''); onClose(); }
+      else setErr("Couldn't find an event in that link. Try a different post.");
+    } catch { setErr('Something went wrong. Try again.'); }
+    setLoading(false);
+  }
+  return (
+    <Modal visible={visible} animationType="slide" transparent onRequestClose={onClose}>
+      <View style={s.sheetWrap}>
+        <View style={s.sheet}>
+          <Text style={s.h2}>Add event from a link</Text>
+          <Text style={s.pSm}>Paste an Instagram, TikTok, X, or any event link. We'll read the post and turn it into an event card.</Text>
+          <TextInput value={url} onChangeText={setUrl} autoCapitalize="none" autoCorrect={false} keyboardType="url" placeholder="https://…" placeholderTextColor={MUTED} style={[s.input, {marginTop:14}]}/>
+          {err ? <Text style={s.errTxt}>{err}</Text> : null}
+          <View style={{height:14}}/>
+          {loading ? <ActivityIndicator color={ACCENT}/> : (
+            <View style={[s.row, {gap:10}]}>
+              <GhostBtn label="Cancel" onPress={onClose}/>
+              <PrimaryBtn label="Import" onPress={go}/>
+            </View>
+          )}
+        </View>
+      </View>
+    </Modal>
+  );
+}
+
 // ---------- Discover Screen ----------
-function Discover({ profile, onEditProfile }: any){
+function Discover({ profile, onEditProfile, onShowSaved }: any){
   const [events, setEvents] = useState<EventItem[]>([]);
   const [summary, setSummary] = useState('');
   const [loading, setLoading] = useState(true);
   const [query, setQuery] = useState('');
   const [open, setOpen] = useState<EventItem | null>(null);
   const [saved, setSaved] = useState<string[]>([]);
+  const [importing, setImporting] = useState(false);
   const [loc, setLoc] = useState<{lat:number;lng:number}>({lat: 40.7128, lng: -74.0060});
-  
+
   useEffect(() => { (async () => {
     const sv = await AsyncStorage.getItem(SAVED_KEY);
     if (sv) setSaved(JSON.parse(sv));
@@ -304,9 +371,19 @@ function Discover({ profile, onEditProfile }: any){
   async function load(q?: string){
     setLoading(true);
     const r = await fetchEvents(profile, loc, q);
-    setEvents(r.events || []);
+    const impRaw = await AsyncStorage.getItem(IMPORTED_KEY);
+    const imp: EventItem[] = impRaw ? JSON.parse(impRaw) : [];
+    setEvents([...imp, ...(r.events || [])]);
     setSummary(r.summary || '');
     setLoading(false);
+  }
+  async function handleImported(ev: EventItem){
+    const impRaw = await AsyncStorage.getItem(IMPORTED_KEY);
+    const imp: EventItem[] = impRaw ? JSON.parse(impRaw) : [];
+    const next = [ev, ...imp.filter(e => e.id !== ev.id)];
+    await AsyncStorage.setItem(IMPORTED_KEY, JSON.stringify(next));
+    setEvents(prev => [ev, ...prev.filter(e => e.id !== ev.id)]);
+    setOpen(ev);
   }
   useEffect(() => { load(); }, [loc.lat, loc.lng]);
   
@@ -319,9 +396,14 @@ function Discover({ profile, onEditProfile }: any){
   return (
     <View style={{flex:1, backgroundColor: BG}}>
       <View style={s.topBar}>
-        <Text style={s.brandSm}>5to9</Text>
-        <TouchableOpacity onPress={onEditProfile} style={s.avatar}><Text style={s.avatarTxt}>{profile.name?.[0]?.toUpperCase() || '\u2606'}</Text></TouchableOpacity>
+        <View><Text style={s.kicker}>FOR YOU</Text><Text style={s.brandSm}>Discover</Text></View>
+        <View style={s.row}>
+          <TouchableOpacity onPress={()=>setImporting(true)} style={s.iconBtn}><Text style={s.iconTxt}>{'+'}</Text></TouchableOpacity>
+          <TouchableOpacity onPress={onShowSaved} style={s.iconBtn}><Text style={s.iconTxt}>{'\u2661'}</Text></TouchableOpacity>
+          <TouchableOpacity onPress={onEditProfile} style={s.avatar}><Text style={s.avatarTxt}>{profile.name?.[0]?.toUpperCase() || '\u2606'}</Text></TouchableOpacity>
+        </View>
       </View>
+      <Text style={s.subhead}>Events matched to your interests</Text>
       <View style={s.searchRow}>
         <View style={s.searchBox}>
           <TextInput value={query} onChangeText={setQuery} onSubmitEditing={()=>load(query)} returnKeyType="search" placeholder="Ask Townie: 'rooftop tonight'" placeholderTextColor={MUTED} style={s.searchInput}/>
@@ -337,17 +419,18 @@ function Discover({ profile, onEditProfile }: any){
         <FlatList
           data={events}
           keyExtractor={(e) => e.id}
-          renderItem={({item}) => <EventCard ev={item} onOpen={()=>setOpen(item)} onSave={()=>toggleSave(item.id)} />}
+          renderItem={({item}) => <EventCard ev={item} saved={saved.includes(item.id)} onOpen={()=>setOpen(item)} onSave={()=>toggleSave(item.id)} />}
           contentContainerStyle={{padding:14, paddingBottom:120}}
           ItemSeparatorComponent={()=> <View style={{height:14}}/>}
         />
       )}
       <EventDetail ev={open} visible={!!open} onClose={()=>setOpen(null)} onSave={()=>{ if(open){toggleSave(open.id); setOpen(null);}}}/>
+      <ImportLinkModal visible={importing} onClose={()=>setImporting(false)} onImported={handleImported}/>
     </View>
   );
 }
 
-function SavedList({ profile }: any){
+function SavedList({ profile, onClose }: any){
   const [items, setItems] = useState<EventItem[]>([]);
   const [open, setOpen] = useState<EventItem | null>(null);
   useEffect(() => { (async () => {
@@ -359,7 +442,7 @@ function SavedList({ profile }: any){
   })(); }, []);
   return (
     <View style={{flex:1, backgroundColor: BG}}>
-      <View style={s.topBar}><Text style={s.brandSm}>Saved</Text></View>
+      <View style={s.topBar}><Text style={s.brandSm}>Saved</Text>{onClose ? <TouchableOpacity onPress={onClose} style={s.iconBtn}><Text style={s.actDetailsTxt}>Done</Text></TouchableOpacity> : null}</View>
       {items.length === 0 ? (
         <View style={s.center}><Text style={s.emptyTitle}>Nothing saved yet</Text><Text style={s.emptyTxt}>Tap Save on any event.</Text></View>
       ) : (
@@ -370,15 +453,283 @@ function SavedList({ profile }: any){
   );
 }
 
-function VipScreen(){
+// ---------- Standout Screen (popular near you) ----------
+function popularityScore(e: EventItem){
+  let v = 0;
+  if (e.price && (e.price.min != null || e.price.max != null)) v += 2; // ticketed => real demand
+  if (e.image) v += 1;
+  if (e.source === 'ticketmaster' || e.source === 'seatgeek') v += 2;
+  if (e.source === 'google_places') v += 1;
+  const m = /\((\d+)\s+reviews?\)/i.exec(e.description || '');
+  if (m) v += Math.min(parseInt(m[1], 10) / 200, 5);
+  return v;
+}
+
+function StandoutScreen({ profile, onEditProfile, onShowSaved }: any){
+  const [events, setEvents] = useState<EventItem[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [open, setOpen] = useState<EventItem | null>(null);
+  const [saved, setSaved] = useState<string[]>([]);
+  const [loc, setLoc] = useState<{lat:number;lng:number}>({lat: 40.7128, lng: -74.0060});
+  useEffect(() => { (async () => {
+    const sv = await AsyncStorage.getItem(SAVED_KEY);
+    if (sv) setSaved(JSON.parse(sv));
+    try {
+      const { status } = await Location.requestForegroundPermissionsAsync();
+      if (status === 'granted') {
+        const pos = await Location.getCurrentPositionAsync({});
+        setLoc({ lat: pos.coords.latitude, lng: pos.coords.longitude });
+      }
+    } catch {}
+  })(); }, []);
+  useEffect(() => { (async () => {
+    setLoading(true);
+    const r = await fetchEvents(profile, loc);
+    const list = (r.events || []).slice().sort((a: EventItem, b: EventItem) => popularityScore(b) - popularityScore(a));
+    setEvents(list);
+    setLoading(false);
+  })(); }, [loc.lat, loc.lng]);
+  async function toggleSave(id: string){
+    const next = saved.includes(id) ? saved.filter(x => x !== id) : [...saved, id];
+    setSaved(next);
+    await AsyncStorage.setItem(SAVED_KEY, JSON.stringify(next));
+  }
   return (
     <View style={{flex:1, backgroundColor: BG}}>
-      <View style={s.topBar}><Text style={s.brandSm}>VIP</Text></View>
-      <View style={s.center}>
-        <Text style={s.emptyTitle}>Coming soon</Text>
-        <Text style={s.emptyTxt}>Curated invites, presales, and member-only nights.</Text>
+      <View style={s.topBar}>
+        <View><Text style={s.kicker}>TONIGHT</Text><Text style={s.brandSm}>Standouts</Text></View>
+        <View style={s.row}>
+          <TouchableOpacity onPress={onShowSaved} style={s.iconBtn}><Text style={s.iconTxt}>{'♡'}</Text></TouchableOpacity>
+          <TouchableOpacity onPress={onEditProfile} style={s.avatar}><Text style={s.avatarTxt}>{profile.name?.[0]?.toUpperCase() || '☆'}</Text></TouchableOpacity>
+        </View>
       </View>
+      <Text style={s.subhead}>The most popular experiences around you right now</Text>
+      {loading ? (
+        <View style={s.center}><ActivityIndicator color={ACCENT}/><Text style={s.emptyTxt}>Finding what's hot nearby…</Text></View>
+      ) : events.length === 0 ? (
+        <View style={s.center}><Text style={s.emptyTitle}>Nothing nearby yet</Text><Text style={s.emptyTxt}>Try a wider radius in your profile.</Text></View>
+      ) : (
+        <FlatList
+          data={events}
+          keyExtractor={(e) => e.id}
+          renderItem={({item, index}) => <EventCard ev={item} rank={index + 1} saved={saved.includes(item.id)} onOpen={()=>setOpen(item)} onSave={()=>toggleSave(item.id)} />}
+          contentContainerStyle={{padding:14, paddingBottom:120}}
+          ItemSeparatorComponent={()=> <View style={{height:14}}/>}
+        />
+      )}
+      <EventDetail ev={open} visible={!!open} onClose={()=>setOpen(null)} onSave={()=>{ if(open){toggleSave(open.id); setOpen(null);} }}/>
     </View>
+  );
+}
+
+// ---------- Friends Screen (invite-code social graph) ----------
+function FriendsScreen({ profile }: any){
+  const [me, setMe] = useState<any>(null);
+  const [friends, setFriends] = useState<any[]>([]);
+  const [addCode, setAddCode] = useState('');
+  const [planText, setPlanText] = useState('');
+  const [going, setGoing] = useState(false);
+  const [msg, setMsg] = useState('');
+  const [loading, setLoading] = useState(true);
+
+  async function loadFriends(uid: string){
+    try {
+      const r = await fetch(API_BASE + '/api/friends', { method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify({ action:'list', userId: uid }) });
+      const d = await r.json();
+      setFriends(d.friends || []);
+    } catch {}
+  }
+  useEffect(() => { (async () => {
+    setLoading(true);
+    const u = await ensureIdentity(profile);
+    setMe(u);
+    if (u?.plan) setPlanText(u.plan);
+    if (u?.going) setGoing(!!u.going);
+    if (u?.userId) await loadFriends(u.userId);
+    setLoading(false);
+  })(); }, []);
+
+  async function addFriend(){
+    if (!addCode.trim() || !me?.userId) return;
+    setMsg('');
+    try {
+      const r = await fetch(API_BASE + '/api/friends', { method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify({ action:'addFriend', userId: me.userId, code: addCode }) });
+      const d = await r.json();
+      if (d.ok) { setAddCode(''); setMsg('Added!'); await loadFriends(me.userId); }
+      else setMsg(d.error || 'Could not add that code.');
+    } catch { setMsg('Network error.'); }
+  }
+  async function savePlan(){
+    if (!me?.userId) return;
+    setMsg('');
+    try {
+      await fetch(API_BASE + '/api/friends', { method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify({ action:'setPlan', userId: me.userId, plan: planText, going }) });
+      setMsg('Plan updated.');
+    } catch { setMsg('Network error.'); }
+  }
+
+  if (loading) return (
+    <View style={{flex:1, backgroundColor: BG}}>
+      <View style={s.topBar}><View><Text style={s.kicker}>YOUR CREW</Text><Text style={s.brandSm}>Friends</Text></View></View>
+      <View style={s.center}><ActivityIndicator color={ACCENT}/></View>
+    </View>
+  );
+
+  return (
+    <View style={{flex:1, backgroundColor: BG}}>
+      <View style={s.topBar}><View><Text style={s.kicker}>YOUR CREW</Text><Text style={s.brandSm}>Friends</Text></View></View>
+      <ScrollView contentContainerStyle={{padding:16, paddingBottom:140}}>
+        <View style={s.vipCard}>
+          <Text style={s.label}>Your invite code</Text>
+          <Text style={s.codeBig}>{me?.code || '—'}</Text>
+          <Text style={s.pSm}>Share this code so friends can add you, and enter theirs below.</Text>
+          <View style={[s.row, {marginTop:12, gap:8}]}>
+            <TextInput value={addCode} onChangeText={setAddCode} autoCapitalize="characters" autoCorrect={false} placeholder="Enter a friend's code" placeholderTextColor={MUTED} style={[s.input, {flex:1}]}/>
+            <TouchableOpacity onPress={addFriend} style={s.townieBtn}><Text style={s.townieBtnTxt}>Add</Text></TouchableOpacity>
+          </View>
+        </View>
+
+        <Text style={s.sectionTitle}>Your night</Text>
+        <TextInput value={planText} onChangeText={setPlanText} placeholder="What are you up to tonight?" placeholderTextColor={MUTED} style={s.input}/>
+        <View style={[s.rowSb, {marginTop:12}]}>
+          <Text style={s.label}>I'm going out</Text>
+          <Switch value={going} onValueChange={setGoing} trackColor={{true: ACCENT}}/>
+        </View>
+        <PrimaryBtn label="Update my plan" onPress={savePlan}/>
+        {msg ? <Text style={[s.pSm, {marginTop:10, textAlign:'center'}]}>{msg}</Text> : null}
+
+        <Text style={s.sectionTitle}>Tonight's plans</Text>
+        {friends.length === 0 ? (
+          <Text style={s.emptyTxt}>No friends yet. Share your code to build your crew.</Text>
+        ) : friends.map((f, i) => (
+          <View key={i} style={s.friendRow}>
+            <View style={s.friendAvatar}><Text style={s.avatarTxt}>{(f.name || '?').split(' ').map((x: string)=>x[0]).join('').slice(0,2).toUpperCase()}</Text></View>
+            <View style={{flex:1}}>
+              <Text style={s.friendName}>{f.name}</Text>
+              <Text style={s.cardMeta}>{f.plan || 'Free tonight'}</Text>
+            </View>
+            {f.going ? <View style={s.goingPill}><Text style={s.goingTxt}>Going</Text></View> : null}
+          </View>
+        ))}
+      </ScrollView>
+    </View>
+  );
+}
+
+// ---------- VIP Screen (members free, vendors pay) ----------
+function VipScreen(){
+  const [featured, setFeatured] = useState<EventItem[]>([]);
+  const [open, setOpen] = useState<EventItem | null>(null);
+  const [showForm, setShowForm] = useState(false);
+  async function loadFeatured(){
+    try { const r = await fetch(API_BASE + '/api/featured'); const d = await r.json(); setFeatured(d.events || []); } catch {}
+  }
+  useEffect(() => { loadFeatured(); }, []);
+  return (
+    <ScrollView style={{flex:1, backgroundColor: BG}} contentContainerStyle={{paddingBottom:120}}>
+      <View style={s.topBar}><View><Text style={s.kicker}>5TO9</Text><Text style={s.brandSm}>VIP</Text></View></View>
+      <View style={{padding:18}}>
+        <View style={s.vipHero}>
+          <Text style={s.vipHeroTitle}>Members get in free.</Text>
+          <Text style={s.vipHeroSub}>5to9 is always free for you. Venues, promoters and event hosts pay to feature their nights and reach the right crowd.</Text>
+        </View>
+
+        {featured.length > 0 ? (
+          <View>
+            <Text style={s.sectionTitle}>Featured tonight</Text>
+            {featured.map(ev => (
+              <View key={ev.id} style={{marginBottom:14}}>
+                <EventCard ev={ev} saved={false} onOpen={()=>setOpen(ev)} onSave={()=>{}}/>
+              </View>
+            ))}
+          </View>
+        ) : null}
+
+        <Text style={s.sectionTitle}>For members</Text>
+        {['Priority access to featured nights & presales','Curated invites that match your vibe','See where your crew is going'].map((t, i) => (
+          <View key={i} style={s.vipRow}><Text style={s.vipCheck}>✓</Text><Text style={s.vipRowTxt}>{t}</Text></View>
+        ))}
+
+        <Text style={s.sectionTitle}>For venues & promoters</Text>
+        <View style={s.vipCard}>
+          <Text style={s.vipCardTitle}>Feature your event</Text>
+          <Text style={s.vipCardSub}>Put your night in front of nearby people whose interests match. Pay per featured event — never any cost to attendees.</Text>
+          <View style={s.vipPriceRow}><Text style={s.vipPrice}>$10</Text><Text style={s.vipPriceUnit}> / featured event</Text></View>
+          <PrimaryBtn label="List your event" onPress={()=>setShowForm(true)}/>
+          <Text style={s.vipNote}>Payments are processed securely via PayPal.</Text>
+        </View>
+      </View>
+      <EventDetail ev={open} visible={!!open} onClose={()=>setOpen(null)} onSave={()=>setOpen(null)}/>
+      <VendorListingModal visible={showForm} onClose={()=>setShowForm(false)} onPublished={()=>{ setShowForm(false); loadFeatured(); }}/>
+    </ScrollView>
+  );
+}
+
+// ---------- Vendor listing + PayPal checkout ----------
+function VendorListingModal({ visible, onClose, onPublished }: any){
+  const [f, setF] = useState({ title:'', venue:'', city:'', startsAt:'', url:'', image:'', description:'' });
+  const [phase, setPhase] = useState<'form'|'approving'|'capturing'|'done'>('form');
+  const [orderID, setOrderID] = useState('');
+  const [err, setErr] = useState('');
+  function set(k: string, v: string){ setF(prev => ({ ...prev, [k]: v })); }
+  function resetAll(){ setF({ title:'', venue:'', city:'', startsAt:'', url:'', image:'', description:'' }); setPhase('form'); setOrderID(''); setErr(''); }
+  async function startCheckout(){
+    if (!f.title.trim()) { setErr('Add an event title.'); return; }
+    setErr('');
+    try {
+      const r = await fetch(API_BASE + '/api/checkout', { method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify({ event: f }) });
+      const d = await r.json();
+      if (!r.ok || !d.approveUrl) { setErr(d.error || 'Could not start PayPal checkout.'); return; }
+      setOrderID(d.orderID);
+      setPhase('approving');
+      Linking.openURL(d.approveUrl);
+    } catch { setErr('Network error. Try again.'); }
+  }
+  async function finishCheckout(){
+    setPhase('capturing'); setErr('');
+    try {
+      const r = await fetch(API_BASE + '/api/capture', { method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify({ orderID }) });
+      const d = await r.json();
+      if (d.ok) { setPhase('done'); setTimeout(()=>{ onPublished(); resetAll(); }, 1300); }
+      else { setErr(d.error || 'Payment not completed yet. Approve it in PayPal, then tap again.'); setPhase('approving'); }
+    } catch { setErr('Network error. Try again.'); setPhase('approving'); }
+  }
+  return (
+    <Modal visible={visible} animationType="slide" onRequestClose={onClose}>
+      <SafeAreaView style={{flex:1, backgroundColor: BG}}>
+        <View style={s.obHeader}><Text style={s.h2}>Feature your event</Text></View>
+        <ScrollView contentContainerStyle={{padding:18, paddingBottom:40}}>
+          {phase === 'form' ? (
+            <View>
+              <Field label="Event title"><TextInput value={f.title} onChangeText={v=>set('title',v)} style={s.input} placeholder="Neon Rave" placeholderTextColor={MUTED}/></Field>
+              <Field label="Venue"><TextInput value={f.venue} onChangeText={v=>set('venue',v)} style={s.input} placeholder="Studio 54" placeholderTextColor={MUTED}/></Field>
+              <Field label="City"><TextInput value={f.city} onChangeText={v=>set('city',v)} style={s.input} placeholder="Seattle" placeholderTextColor={MUTED}/></Field>
+              <Field label="Date & time" hint="e.g. 2026-06-14 22:00"><TextInput value={f.startsAt} onChangeText={v=>set('startsAt',v)} style={s.input} placeholder="2026-06-14 22:00" placeholderTextColor={MUTED}/></Field>
+              <Field label="Link (tickets / info)"><TextInput value={f.url} onChangeText={v=>set('url',v)} autoCapitalize="none" style={s.input} placeholder="https://…" placeholderTextColor={MUTED}/></Field>
+              <Field label="Image URL"><TextInput value={f.image} onChangeText={v=>set('image',v)} autoCapitalize="none" style={s.input} placeholder="https://…/poster.jpg" placeholderTextColor={MUTED}/></Field>
+              <Field label="Description"><TextInput value={f.description} onChangeText={v=>set('description',v)} multiline style={[s.input,{height:90, textAlignVertical:'top'}]} placeholder="Tell people what to expect" placeholderTextColor={MUTED}/></Field>
+              {err ? <Text style={s.errTxt}>{err}</Text> : null}
+            </View>
+          ) : phase === 'approving' ? (
+            <View style={{paddingVertical:20}}>
+              <Text style={s.pBig}>Complete your $10 payment in the PayPal window that just opened.</Text>
+              <View style={{height:10}}/>
+              <Text style={s.pSm}>Once you've approved it in PayPal, come back here and tap "I've completed payment" to publish your event.</Text>
+              {err ? <Text style={s.errTxt}>{err}</Text> : null}
+            </View>
+          ) : phase === 'capturing' ? (
+            <View style={s.center}><ActivityIndicator color={ACCENT}/><Text style={s.emptyTxt}>Confirming payment…</Text></View>
+          ) : (
+            <View style={s.center}><Text style={s.emptyTitle}>You're live! 🎉</Text><Text style={s.emptyTxt}>Your event is now featured in 5to9.</Text></View>
+          )}
+        </ScrollView>
+        <View style={s.obFooter}>
+          <GhostBtn label="Cancel" onPress={()=>{ resetAll(); onClose(); }}/>
+          {phase === 'form' ? <PrimaryBtn label="Pay $10 with PayPal" onPress={startCheckout}/> : null}
+          {phase === 'approving' ? <PrimaryBtn label="I've completed payment" onPress={finishCheckout}/> : null}
+        </View>
+      </SafeAreaView>
+    </Modal>
   );
 }
 
@@ -410,7 +761,7 @@ function EditProfile({ profile, onSave, onClose }: any){
 
 // ---------- Tab Bar ----------
 function TabBar({ tab, setTab }: any){
-  const tabs = [{k:'discover', l:'Discover'},{k:'saved', l:'Saved'},{k:'vip', l:'VIP'}];
+  const tabs = [{k:'discover', l:'Discover'},{k:'standout', l:'Standout'},{k:'friends', l:'Friends'},{k:'vip', l:'VIP'}];
   return (
     <View style={s.tabBar}>
       {tabs.map(t => (
@@ -428,6 +779,7 @@ export default function App(){
   const [loading, setLoading] = useState(true);
   const [tab, setTab] = useState('discover');
   const [editing, setEditing] = useState(false);
+  const [showSaved, setShowSaved] = useState(false);
   useEffect(() => { (async () => {
     const raw = await AsyncStorage.getItem(PROFILE_KEY);
     if (raw) setProfile(JSON.parse(raw));
@@ -446,11 +798,19 @@ export default function App(){
   return (
     <SafeAreaView style={{flex:1, backgroundColor: BG}}>
       <StatusBar style="light"/>
-      {tab === 'discover' && <Discover profile={profile} onEditProfile={()=>setEditing(true)}/>}
-      {tab === 'saved' && <SavedList profile={profile}/>}
+      {tab === 'discover' && <Discover profile={profile} onEditProfile={()=>setEditing(true)} onShowSaved={()=>setShowSaved(true)}/>}
+      {tab === 'standout' && <StandoutScreen profile={profile} onEditProfile={()=>setEditing(true)} onShowSaved={()=>setShowSaved(true)}/>}
+      {tab === 'friends' && <FriendsScreen profile={profile}/>}
       {tab === 'vip' && <VipScreen/>}
       <TabBar tab={tab} setTab={setTab}/>
       {editing && <EditProfile profile={profile} onSave={handleSaveProfile} onClose={()=>setEditing(false)}/>}
+      {showSaved && (
+        <Modal visible animationType="slide" onRequestClose={()=>setShowSaved(false)}>
+          <SafeAreaView style={{flex:1, backgroundColor: BG}}>
+            <SavedList profile={profile} onClose={()=>setShowSaved(false)}/>
+          </SafeAreaView>
+        </Modal>
+      )}
     </SafeAreaView>
   );
 }
@@ -515,4 +875,41 @@ const s = StyleSheet.create({
   detailMeta: { color: MUTED, fontSize:14, marginTop:4 },
   detailDesc: { color: FG, fontSize:15, lineHeight:22, marginTop:14 },
   detailFooter: { flexDirection:'row', gap:10, padding:14, paddingBottom:24, borderTopWidth:1, borderTopColor: LINE },
+
+  // --- added: sleeker look + new screens ---
+  kicker: { color: ACCENT, fontSize:11, fontWeight:'800', letterSpacing:1.5, textTransform:'uppercase', marginBottom:2 },
+  subhead: { color: MUTED, fontSize:13, paddingHorizontal:16, paddingTop:2, paddingBottom:6 },
+  iconBtn: { width:36, height:36, borderRadius:18, backgroundColor: CARD, alignItems:'center', justifyContent:'center', borderWidth:1, borderColor: LINE, marginRight:8 },
+  iconTxt: { color: FG, fontSize:16 },
+  sectionTitle: { color: FG, fontSize:16, fontWeight:'800', marginTop:22, marginBottom:12 },
+  cardImgFallback: { alignItems:'center', justifyContent:'center', backgroundColor:'#1c1c24' },
+  cardImgFallbackTxt: { color: ACCENT, fontSize:54, fontWeight:'900', opacity:0.5 },
+  rankBadge: { position:'absolute', top:12, left:12, backgroundColor: ACCENT, paddingHorizontal:10, paddingVertical:5, borderRadius:999 },
+  rankTxt: { color:'#000', fontSize:12, fontWeight:'800' },
+  heartOverlay: { position:'absolute', top:10, right:10, width:36, height:36, borderRadius:18, backgroundColor:'rgba(0,0,0,0.45)', alignItems:'center', justifyContent:'center' },
+  heartOverlayTxt: { color: ACCENT, fontSize:18, fontWeight:'700' },
+  invitePill: { backgroundColor: ACCENT, paddingHorizontal:16, paddingVertical:9, borderRadius:999 },
+  invitePillTxt: { color:'#000', fontWeight:'800', fontSize:13 },
+  friendRow: { flexDirection:'row', alignItems:'center', paddingVertical:12, borderBottomWidth:1, borderBottomColor: LINE, gap:12 },
+  friendAvatar: { width:46, height:46, borderRadius:23, backgroundColor: CARD, borderWidth:1.5, borderColor: ACCENT, alignItems:'center', justifyContent:'center' },
+  friendName: { color: FG, fontSize:16, fontWeight:'700' },
+  goingPill: { borderWidth:1, borderColor:'#2e7d32', borderRadius:999, paddingHorizontal:12, paddingVertical:6 },
+  goingTxt: { color:'#5dd15d', fontWeight:'700', fontSize:12 },
+  vipHero: { backgroundColor: CARD, borderRadius:20, borderWidth:1, borderColor: LINE, padding:20 },
+  vipHeroTitle: { color: FG, fontSize:24, fontWeight:'900', letterSpacing:-0.5 },
+  vipHeroSub: { color: MUTED, fontSize:14, lineHeight:21, marginTop:8 },
+  vipRow: { flexDirection:'row', alignItems:'flex-start', gap:10, marginBottom:10 },
+  vipCheck: { color: ACCENT, fontWeight:'900', fontSize:15 },
+  vipRowTxt: { color: FG, fontSize:14, flex:1, lineHeight:20 },
+  vipCard: { backgroundColor: CARD, borderRadius:20, borderWidth:1, borderColor: LINE, padding:20 },
+  vipCardTitle: { color: FG, fontSize:18, fontWeight:'800' },
+  vipCardSub: { color: MUTED, fontSize:14, lineHeight:21, marginTop:6, marginBottom:14 },
+  vipPriceRow: { flexDirection:'row', alignItems:'baseline', marginBottom:14 },
+  vipPrice: { color: ACCENT, fontSize:32, fontWeight:'900' },
+  vipPriceUnit: { color: MUTED, fontSize:14 },
+  vipNote: { color: MUTED, fontSize:11, marginTop:12, textAlign:'center' },
+  sheetWrap: { flex:1, justifyContent:'flex-end', backgroundColor:'rgba(0,0,0,0.55)' },
+  sheet: { backgroundColor: BG, borderTopLeftRadius:22, borderTopRightRadius:22, borderWidth:1, borderColor: LINE, padding:22, paddingBottom:34 },
+  errTxt: { color:'#ff6b6b', fontSize:13, marginTop:10 },
+  codeBig: { color: ACCENT, fontSize:34, fontWeight:'900', letterSpacing:4, marginVertical:6 },
 });
