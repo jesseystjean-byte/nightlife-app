@@ -89,6 +89,10 @@ function fmtDate(iso?: string){
     return d.toLocaleString(undefined, { weekday:'short', month:'short', day:'numeric', hour:'numeric', minute:'2-digit' });
   } catch { return iso; }
 }
+function fmtTime(iso?: string){
+  if (!iso) return '';
+  try { return new Date(iso).toLocaleString(undefined, { hour:'numeric', minute:'2-digit' }).replace(/\s/g,'').toLowerCase(); } catch { return ''; }
+}
 function fmtPrice(p?: EventItem['price']){
   if (!p) return '';
   if (p.free) return 'Free';
@@ -148,7 +152,7 @@ function Progress({step, total}: any){
 
 // ---------- Onboarding ----------
 const STEPS = [
-  'Welcome','You','Location','Lifestyle','Interests','Vibes','Schedule','Budget & Setting','Final touches'
+  'Welcome','You','Location','Lifestyle','Interests','Vibes','Budget & Setting','Final touches'
 ];
 
 function Onboarding({ onDone }: { onDone: (p: Profile) => void }){
@@ -165,8 +169,7 @@ function Onboarding({ onDone }: { onDone: (p: Profile) => void }){
     if (step === 2) return p.city.trim().length > 0;
     if (step === 4) return p.interests.length >= 3;
     if (step === 5) return p.vibes.length >= 1;
-    if (step === 6) return p.daysAvailable.length >= 1 && p.timesOfDay.length >= 1;
-    if (step === 7) return p.priceRange.length >= 1 && !!p.company;
+    if (step === 6) return p.priceRange.length >= 1 && !!p.company;
     return true;
   })();
   function next(){
@@ -207,8 +210,8 @@ function Onboarding({ onDone }: { onDone: (p: Profile) => void }){
             <Field label="Your city">
               <TextInput value={p.city} onChangeText={v=>setP({...p,city:v})} placeholder="e.g. Brooklyn, NY" placeholderTextColor={MUTED} style={s.input}/>
             </Field>
-            <Field label={'Max distance: ' + p.maxDistanceKm + ' km'}>
-              <View style={s.wrap}>{[5,10,25,50,100].map(d => <Chip key={d} label={d+' km'} on={p.maxDistanceKm===d} onPress={()=>setP({...p,maxDistanceKm:d})} small/>)}</View>
+            <Field label={'Max distance: ' + p.maxDistanceKm + ' mi'}>
+              <View style={s.wrap}>{[5,10,25,50,100].map(d => <Chip key={d} label={d+' mi'} on={p.maxDistanceKm===d} onPress={()=>setP({...p,maxDistanceKm:d})} small/>)}</View>
             </Field>
           </>)}
           {step === 3 && (<>
@@ -228,18 +231,13 @@ function Onboarding({ onDone }: { onDone: (p: Profile) => void }){
             <View style={[s.wrap, {marginTop:10}]}>{VIBES.map(v => <Chip key={v} label={v} on={p.vibes.includes(v)} onPress={()=>setP({...p, vibes: toggle(p.vibes, v)})}/>)}</View>
           </>)}
           {step === 6 && (<>
-            <Text style={s.h1}>When</Text>
-            <Field label="Days you\u2019re usually free"><View style={s.wrap}>{DAYS.map(d => <Chip key={d} label={d} on={p.daysAvailable.includes(d)} onPress={()=>setP({...p, daysAvailable: toggle(p.daysAvailable, d)})} small/>)}</View></Field>
-            <Field label="Times of day"><View style={s.wrap}>{TIMES.map(t => <Chip key={t} label={t} on={p.timesOfDay.includes(t)} onPress={()=>setP({...p, timesOfDay: toggle(p.timesOfDay, t)})} small/>)}</View></Field>
-          </>)}
-          {step === 7 && (<>
             <Text style={s.h1}>Budget & setting</Text>
             <Field label="Price range"><View style={s.wrap}>{PRICE.map(pr => <Chip key={pr} label={pr} on={p.priceRange.includes(pr)} onPress={()=>setP({...p, priceRange: toggle(p.priceRange, pr)})} small/>)}</View></Field>
             <Field label="Indoor / outdoor"><View style={s.wrap}>{SETTING.map(x => <Chip key={x} label={x} on={p.setting===x} onPress={()=>setP({...p, setting:x})} small/>)}</View></Field>
             <Field label="Going with"><View style={s.wrap}>{COMPANY.map(c => <Chip key={c} label={c} on={p.company===c} onPress={()=>setP({...p, company:c})} small/>)}</View></Field>
             <Field label="Crowd size"><View style={s.wrap}>{CROWD.map(c => <Chip key={c} label={c} on={p.crowdSize===c} onPress={()=>setP({...p, crowdSize:c})} small/>)}</View></Field>
           </>)}
-          {step === 8 && (<>
+          {step === 7 && (<>
             <Text style={s.h1}>Final touches</Text>
             <Field label="Accessibility needs (optional)"><View style={s.wrap}>{ACCESS.map(a => <Chip key={a} label={a} on={p.accessibility.includes(a)} onPress={()=>setP({...p, accessibility: toggle(p.accessibility, a)})} small/>)}</View></Field>
             <View style={s.rowSb}><Text style={s.label}>Event notifications</Text><Switch value={p.notifications} onValueChange={v=>setP({...p, notifications:v})} trackColor={{true: ACCENT}}/></View>
@@ -296,7 +294,9 @@ function EventDetail({ ev, visible, onClose, onSave }: any){
             <Text style={s.detailMeta}>{[ev.venue, ev.city].filter(Boolean).join(' \u00b7 ')}</Text>
             <Text style={s.detailMeta}>{fmtDate(ev.startsAt)}</Text>
             {ev.price && <Text style={s.detailMeta}>{fmtPrice(ev.price)}</Text>}
+            {(ev as any)._note ? <Text style={s.detailNote}>{(ev as any)._note}</Text> : null}
             {ev.description ? <Text style={s.detailDesc}>{ev.description}</Text> : null}
+            {ev.url ? <TouchableOpacity onPress={()=>Linking.openURL(ev.url)} style={s.linkBtn}><Text style={s.linkBtnTxt}>Get tickets / more info</Text></TouchableOpacity> : null}
           </View>
         </ScrollView>
         <View style={s.detailFooter}>
@@ -354,6 +354,7 @@ function Discover({ profile, onEditProfile, onShowSaved }: any){
   const [open, setOpen] = useState<EventItem | null>(null);
   const [saved, setSaved] = useState<string[]>([]);
   const [importing, setImporting] = useState(false);
+  const [index, setIndex] = useState(0);
   const [loc, setLoc] = useState<{lat:number;lng:number}>({lat: 40.7128, lng: -74.0060});
 
   useEffect(() => { (async () => {
@@ -373,9 +374,37 @@ function Discover({ profile, onEditProfile, onShowSaved }: any){
     const r = await fetchEvents(profile, loc, q);
     const impRaw = await AsyncStorage.getItem(IMPORTED_KEY);
     const imp: EventItem[] = impRaw ? JSON.parse(impRaw) : [];
-    setEvents([...imp, ...(r.events || [])]);
+    const paRaw = await AsyncStorage.getItem(PASSED_KEY);
+    const pa: string[] = paRaw ? JSON.parse(paRaw) : [];
+    const list = [...imp, ...(r.events || [])].filter(e => !pa.includes(e.id));
+    setEvents(list);
+    setIndex(0);
     setSummary(r.summary || '');
     setLoading(false);
+  }
+  async function onTownie(){
+    const q = query.trim();
+    if (/^https?:\/\//i.test(q)) {
+      try {
+        const r = await fetch(API_BASE + '/api/import', { method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify({ url: q }) });
+        const d = await r.json();
+        if (d.event) { await handleImported(d.event); setQuery(''); }
+      } catch {}
+    } else { load(q); }
+  }
+  async function pass(){
+    const cur = events[index];
+    if (cur) {
+      const praw = await AsyncStorage.getItem(PASSED_KEY);
+      const pa: string[] = praw ? JSON.parse(praw) : [];
+      if (!pa.includes(cur.id)) { pa.push(cur.id); await AsyncStorage.setItem(PASSED_KEY, JSON.stringify(pa)); }
+    }
+    setIndex(i => i + 1);
+  }
+  async function like(){
+    const cur = events[index];
+    if (cur && !saved.includes(cur.id)) await toggleSave(cur.id);
+    setIndex(i => i + 1);
   }
   async function handleImported(ev: EventItem){
     const impRaw = await AsyncStorage.getItem(IMPORTED_KEY);
@@ -396,33 +425,49 @@ function Discover({ profile, onEditProfile, onShowSaved }: any){
   return (
     <View style={{flex:1, backgroundColor: BG}}>
       <View style={s.topBar}>
-        <View><Text style={s.kicker}>FOR YOU</Text><Text style={s.brandSm}>Discover</Text></View>
+        <Text style={s.brandSm}>5to9</Text>
         <View style={s.row}>
-          <TouchableOpacity onPress={()=>setImporting(true)} style={s.iconBtn}><Text style={s.iconTxt}>{'+'}</Text></TouchableOpacity>
           <TouchableOpacity onPress={onShowSaved} style={s.iconBtn}><Text style={s.iconTxt}>{'\u2661'}</Text></TouchableOpacity>
           <TouchableOpacity onPress={onEditProfile} style={s.avatar}><Text style={s.avatarTxt}>{profile.name?.[0]?.toUpperCase() || '\u2606'}</Text></TouchableOpacity>
         </View>
       </View>
-      <Text style={s.subhead}>Events matched to your interests</Text>
       <View style={s.searchRow}>
         <View style={s.searchBox}>
-          <TextInput value={query} onChangeText={setQuery} onSubmitEditing={()=>load(query)} returnKeyType="search" placeholder="Ask Townie: 'rooftop tonight'" placeholderTextColor={MUTED} style={s.searchInput}/>
+          <TextInput value={query} onChangeText={setQuery} onSubmitEditing={onTownie} returnKeyType="search" placeholder="Search events" placeholderTextColor={MUTED} style={s.searchInput}/>
         </View>
-        <TouchableOpacity onPress={()=>load(query)} style={s.townieBtn}><Text style={s.townieBtnTxt}>Go</Text></TouchableOpacity>
+        <TouchableOpacity onPress={onTownie} style={s.toniePill}><Text style={s.toniePillTxt}>🤖</Text></TouchableOpacity>
       </View>
       {summary ? <Text style={s.summary}>{summary}</Text> : null}
       {loading ? (
         <View style={s.center}><ActivityIndicator color={ACCENT}/><Text style={s.emptyTxt}>Curating your night\u2026</Text></View>
-      ) : events.length === 0 ? (
-        <View style={s.center}><Text style={s.emptyTitle}>No events yet</Text><Text style={s.emptyTxt}>Try a wider radius or different keyword.</Text></View>
+      ) : !events[index] ? (
+        <View style={s.center}><Text style={s.emptyTitle}>That's everything for now</Text><Text style={s.emptyTxt}>Check back later, widen your radius, or ask Townie.</Text><View style={{height:16}}/><PrimaryBtn label="Reload" onPress={()=>load()}/></View>
       ) : (
-        <FlatList
-          data={events}
-          keyExtractor={(e) => e.id}
-          renderItem={({item}) => <EventCard ev={item} saved={saved.includes(item.id)} onOpen={()=>setOpen(item)} onSave={()=>toggleSave(item.id)} />}
-          contentContainerStyle={{padding:14, paddingBottom:120}}
-          ItemSeparatorComponent={()=> <View style={{height:14}}/>}
-        />
+        <View style={{flex:1, paddingHorizontal:16, paddingTop:6}}>
+          {(() => { const cur:any = events[index]; return (
+          <>
+          <View style={s.swipeCard}>
+            {cur.image
+              ? <Image source={{uri: cur.image}} style={s.swipeImg}/>
+              : <View style={[s.swipeImg, s.cardImgFallback]}><Text style={s.cardImgFallbackTxt}>{(cur.title||'5to9')[0].toUpperCase()}</Text></View>}
+            <View style={s.swipeBody}>
+              <View style={[s.wrap, {marginBottom:8}]}>
+                {(cur.categories||[]).slice(0,2).map((c:string,i:number)=>(<View key={i} style={s.catChip}><Text style={s.catChipTxt}>{c}</Text></View>))}
+                {cur._score!=null ? <View style={s.matchChip}><Text style={s.matchChipTxt}>{Math.round(cur._score)}% match</Text></View> : null}
+              </View>
+              <Text style={s.swipeTitle} numberOfLines={2}>{cur.title}</Text>
+              <Text style={s.swipeMeta}>{[cur.venue||cur.city, fmtTime(cur.startsAt), fmtPrice(cur.price)].filter(Boolean).join('  ·  ')}</Text>
+              {cur._note || cur.description ? <Text style={s.swipeDesc} numberOfLines={2}>{cur._note || cur.description}</Text> : null}
+            </View>
+          </View>
+          <View style={s.swipeActions}>
+            <TouchableOpacity onPress={pass} style={[s.swipeBtn, s.swipeNo]}><Text style={s.swipeBtnIcon}>👎</Text></TouchableOpacity>
+            <TouchableOpacity onPress={()=>setOpen(cur)} style={s.detailsBtn}><Text style={s.detailsBtnTxt}>More Details</Text></TouchableOpacity>
+            <TouchableOpacity onPress={like} style={[s.swipeBtn, s.swipeYes]}><Text style={s.swipeBtnIcon}>❤️</Text></TouchableOpacity>
+          </View>
+          </>
+          ); })()}
+        </View>
       )}
       <EventDetail ev={open} visible={!!open} onClose={()=>setOpen(null)} onSave={()=>{ if(open){toggleSave(open.id); setOpen(null);}}}/>
       <ImportLinkModal visible={importing} onClose={()=>setImporting(false)} onImported={handleImported}/>
@@ -744,7 +789,7 @@ function EditProfile({ profile, onSave, onClose }: any){
         <ScrollView contentContainerStyle={{padding:18, paddingBottom:60}}>
           <Field label="Name"><TextInput value={p.name} onChangeText={v=>setP({...p,name:v})} style={s.input}/></Field>
           <Field label="City"><TextInput value={p.city} onChangeText={v=>setP({...p,city:v})} style={s.input}/></Field>
-          <Field label={'Max distance: ' + p.maxDistanceKm + ' km'}><View style={s.wrap}>{[5,10,25,50,100].map(d => <Chip key={d} label={d+' km'} on={p.maxDistanceKm===d} onPress={()=>setP({...p, maxDistanceKm:d})} small/>)}</View></Field>
+          <Field label={'Max distance: ' + p.maxDistanceKm + ' mi'}><View style={s.wrap}>{[5,10,25,50,100].map(d => <Chip key={d} label={d+' mi'} on={p.maxDistanceKm===d} onPress={()=>setP({...p, maxDistanceKm:d})} small/>)}</View></Field>
           <Field label="Interests"><View style={s.wrap}>{INTERESTS.map(i => <Chip key={i} label={i} on={p.interests.includes(i)} onPress={()=>setP({...p, interests: toggle(p.interests, i)})}/>)}</View></Field>
           <Field label="Vibes"><View style={s.wrap}>{VIBES.map(v => <Chip key={v} label={v} on={p.vibes.includes(v)} onPress={()=>setP({...p, vibes: toggle(p.vibes, v)})}/>)}</View></Field>
           <Field label="Price"><View style={s.wrap}>{PRICE.map(pr => <Chip key={pr} label={pr} on={p.priceRange.includes(pr)} onPress={()=>setP({...p, priceRange: toggle(p.priceRange, pr)})} small/>)}</View></Field>
@@ -912,4 +957,27 @@ const s = StyleSheet.create({
   sheet: { backgroundColor: BG, borderTopLeftRadius:22, borderTopRightRadius:22, borderWidth:1, borderColor: LINE, padding:22, paddingBottom:34 },
   errTxt: { color:'#ff6b6b', fontSize:13, marginTop:10 },
   codeBig: { color: ACCENT, fontSize:34, fontWeight:'900', letterSpacing:4, marginVertical:6 },
+  // --- Discover swipe layout ---
+  toniePill: { backgroundColor: CARD, borderWidth:1, borderColor: ACCENT, borderRadius:999, paddingHorizontal:14, paddingVertical:11, justifyContent:'center' },
+  toniePillTxt: { color: ACCENT, fontWeight:'800', fontSize:14 },
+  swipeCard: { flex:1, backgroundColor: CARD, borderRadius:22, overflow:'hidden', borderWidth:1, borderColor: LINE, marginBottom:14 },
+  swipeImg: { width:'100%', flex:1, minHeight:200, backgroundColor:'#1a1a22' },
+  swipeBody: { padding:16 },
+  catChip: { backgroundColor:'rgba(217,255,61,0.14)', borderWidth:1, borderColor: ACCENT, borderRadius:999, paddingHorizontal:12, paddingVertical:5, marginRight:8, marginBottom:6 },
+  catChipTxt: { color: ACCENT, fontSize:12, fontWeight:'700' },
+  matchChip: { backgroundColor: ACCENT, borderRadius:999, paddingHorizontal:12, paddingVertical:5, marginBottom:6 },
+  matchChipTxt: { color:'#000', fontSize:12, fontWeight:'800' },
+  swipeTitle: { color: FG, fontSize:26, fontWeight:'800', marginTop:2 },
+  swipeMeta: { color: MUTED, fontSize:14, marginTop:6 },
+  swipeDesc: { color: FG, fontSize:14, fontStyle:'italic', marginTop:8, lineHeight:20 },
+  swipeActions: { flexDirection:'row', alignItems:'center', justifyContent:'space-between', paddingBottom:24, gap:14 },
+  swipeBtn: { width:64, height:64, borderRadius:32, alignItems:'center', justifyContent:'center', borderWidth:1, borderColor: LINE },
+  swipeNo: { backgroundColor: CARD },
+  swipeYes: { backgroundColor: CARD },
+  swipeBtnIcon: { fontSize:26 },
+  detailsBtn: { flex:1, backgroundColor: CARD, borderWidth:1, borderColor: LINE, borderRadius:999, paddingVertical:16, alignItems:'center' },
+  detailsBtnTxt: { color: FG, fontWeight:'700', fontSize:15 },
+  detailNote: { color: ACCENT, fontSize:14, fontStyle:'italic', marginTop:12, lineHeight:20 },
+  linkBtn: { marginTop:18, backgroundColor: ACCENT, borderRadius:12, paddingVertical:14, alignItems:'center' },
+  linkBtnTxt: { color:'#000', fontWeight:'800', fontSize:15 },
 });
