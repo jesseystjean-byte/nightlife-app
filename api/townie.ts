@@ -44,7 +44,7 @@ async function fromEventbrite(lat: number, lng: number, withinKm: number): Promi
   const token = process.env.EVENTBRITE_TOKEN;
   if (!token) return [];
   // Eventbrite public search endpoint
-  const url = `https://www.eventbriteapi.com/v3/events/search/?location.latitude=${lat}&location.longitude=${lng}&location.within=${withinKm}km&expand=venue,ticket_availability&token=${token}`;
+  const url = `https://www.eventbriteapi.com/v3/events/search/?location.latitude=${lat}&location.longitude=${lng}&location.within=${Math.round(withinKm * 1.609)}km&expand=venue,ticket_availability&token=${token}`;
   const data = await safeFetch(url);
   if (!data?.events) return [];
   return data.events.slice(0, 30).map((e: any): EventItem => ({
@@ -67,7 +67,7 @@ async function fromEventbrite(lat: number, lng: number, withinKm: number): Promi
 async function fromTicketmaster(lat: number, lng: number, withinKm: number): Promise<EventItem[]> {
   const key = process.env.TICKETMASTER_KEY;
   if (!key) return [];
-  const url = `https://app.ticketmaster.com/discovery/v2/events.json?latlong=${lat},${lng}&radius=${Math.round(withinKm * 0.621)}&unit=miles&size=30&apikey=${key}`;
+  const url = `https://app.ticketmaster.com/discovery/v2/events.json?latlong=${lat},${lng}&radius=${Math.round(withinKm)}&unit=miles&size=40&apikey=${key}`;
   const data = await safeFetch(url);
   const events = data?._embedded?.events || [];
   return events.map((e: any): EventItem => ({
@@ -90,7 +90,7 @@ async function fromTicketmaster(lat: number, lng: number, withinKm: number): Pro
 async function fromSeatGeek(lat: number, lng: number, withinKm: number): Promise<EventItem[]> {
   const id = process.env.SEATGEEK_CLIENT_ID;
   if (!id) return [];
-  const url = `https://api.seatgeek.com/2/events?lat=${lat}&lon=${lng}&range=${Math.round(withinKm * 0.621)}mi&per_page=30&client_id=${id}`;
+  const url = `https://api.seatgeek.com/2/events?lat=${lat}&lon=${lng}&range=${Math.round(withinKm)}mi&per_page=40&client_id=${id}`;
   const data = await safeFetch(url);
   const events = data?.events || [];
   return events.map((e: any): EventItem => ({
@@ -114,8 +114,8 @@ async function fromGooglePlaces(lat: number, lng: number, withinKm: number): Pro
   const key = process.env.GOOGLE_PLACES_KEY;
   if (!key) return [];
   // Nearby search for bars/clubs/restaurants — adds "what's open now" venue suggestions
-  const radius = Math.min(Math.round(withinKm * 1000), 50000);
-  const url = `https://maps.googleapis.com/maps/api/place/nearbysearch/json?location=${lat},${lng}&radius=${radius}&type=night_club&opennow=true&key=${key}`;
+  const radius = Math.min(Math.round(withinKm * 1609), 50000);
+  const url = `https://maps.googleapis.com/maps/api/place/nearbysearch/json?location=${lat},${lng}&radius=${radius}&keyword=${encodeURIComponent('nightlife bar event trivia live music')}&key=${key}`;
   const data = await safeFetch(url);
   const places = data?.results || [];
   return places.slice(0, 15).map((p: any): EventItem => ({
@@ -144,13 +144,14 @@ async function curateWithClaude(profile: Profile, events: EventItem[], query?: s
     price: e.price, description: e.description?.slice(0, 200),
   }));
   
-  const prompt = `You are 5to9's event curator. Rank these events for this user and give a short personal note for each.
+  const prompt = `You are 5to9's event curator for ALL kinds of going-out — not just concerts and shows, but sports watch parties, reality-TV viewing nights, thrift/vintage pop-ups, pick-up sports, run clubs, trivia nights, comedy, drag, art walks, markets and food events — every kind of local happening.
+Rank these events for this user and give a short personal note for each. Distances are in miles. Strongly prefer events happening TODAY, and reward variety of event type (don't return only concerts).
 USER PROFILE: ${JSON.stringify(profile)}
 USER QUERY: ${query || '(none)'}
 EVENTS: ${JSON.stringify(compact)}
 
 Reply ONLY with JSON of shape: { "summary": "1-2 sentence vibe summary", "ranked": [{ "id": "...", "score": 0-100, "why": "personal note 1 sentence" }, ...] }
-Top 20 only. Score by interest match, vibe fit, time/day fit, price fit.`;
+Top 25 only. Score by interest match, vibe fit, variety of event type, time fit, price fit.`;
 
   try {
     const r = await fetch('https://api.anthropic.com/v1/messages', {
@@ -178,7 +179,7 @@ Top 20 only. Score by interest match, vibe fit, time/day fit, price fit.`;
       scoreById[r.id] = { score: r.score, why: r.why };
     }
     const ranked = events
-      .map(e => ({ ...e, _score: scoreById[e.id]?.score ?? 0, description: scoreById[e.id]?.why || e.description }))
+      .map(e => ({ ...e, _score: scoreById[e.id]?.score ?? 0, _note: scoreById[e.id]?.why || '' }))
       .sort((a, b) => (b as any)._score - (a as any)._score);
     return { ranked, summary: parsed.summary || '' };
   } catch {
@@ -216,7 +217,12 @@ export default async function handler(req: any, res: any) {
       return true;
     });
     
-    const { ranked, summary } = await curateWithClaude(profile, merged, query);
+    // Always prioritize events happening on the day the app is opened.
+    const today = new Date().toDateString();
+    const todays = merged.filter(e => { const v = (e as any).startsAt; const t = Date.parse(v || ''); return isNaN(t) ? false : new Date(v).toDateString() === today; });
+    const pool = todays.length >= 6 ? todays : merged;
+
+    const { ranked, summary } = await curateWithClaude(profile, pool, query);
 
     // Paid/featured events (vendors who paid via PayPal) ride at the top of the feed.
     let featured: EventItem[] = [];
