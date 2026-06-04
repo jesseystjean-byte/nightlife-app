@@ -1,0 +1,37 @@
+name: Build & submit iOS (EAS)
+
+# Manual trigger from the Actions tab (recommended), or auto on changes to the app.
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'mobile/**'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 18
+
+      - name: Setup EAS
+        uses: expo/expo-github-action@v8
+        with:
+          eas-version: latest
+          token: ${{ secrets.EXPO_TOKEN }}
+
+      - name: Install dependencies
+        working-directory: mobile
+        run: npm install
+
+      # Builds in EAS cloud and submits straight to App Store Connect / TestFlight.
+      # --non-interactive avoids the prompts that broke the manual runs.
+      - name: Build & submit
+        working-directory: mobile
+        run: eas build --platform ios --profile production --non-interactive --auto-submit
