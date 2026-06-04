@@ -19,6 +19,7 @@
       "bundleIdentifier": "com.nightlife.social.nightlifeapp",
       "buildNumber": "8",
       "infoPlist": {
+        "ITSAppUsesNonExemptEncryption": false,
         "NSLocationWhenInUseUsageDescription": "5to9 uses your location to find events near you.",
         "NSUserTrackingUsageDescription": "This identifier will be used to deliver personalized event recommendations."
       }
