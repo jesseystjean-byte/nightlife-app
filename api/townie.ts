@@ -80,7 +80,7 @@ async function fromTicketmaster(lat: number, lng: number, withinKm: number): Pro
     lat: e._embedded?.venues?.[0]?.location?.latitude ? parseFloat(e._embedded.venues[0].location.latitude) : undefined,
     lng: e._embedded?.venues?.[0]?.location?.longitude ? parseFloat(e._embedded.venues[0].location.longitude) : undefined,
     url: e.url,
-    image: e.images?.[0]?.url,
+    image: (e.images || []).slice().sort((a: any, b: any) => (b.width || 0) - (a.width || 0))[0]?.url,
     price: e.priceRanges?.[0] ? { min: e.priceRanges[0].min, max: e.priceRanges[0].max, currency: e.priceRanges[0].currency } : undefined,
     categories: e.classifications?.map((c: any) => c.segment?.name).filter(Boolean),
     description: e.info || e.pleaseNote,
@@ -128,9 +128,42 @@ async function fromGooglePlaces(lat: number, lng: number, withinKm: number): Pro
     lat: p.geometry?.location?.lat,
     lng: p.geometry?.location?.lng,
     url: `https://www.google.com/maps/place/?q=place_id:${p.place_id}`,
-    image: p.photos?.[0] ? `https://maps.googleapis.com/maps/api/place/photo?maxwidth=600&photoreference=${p.photos[0].photo_reference}&key=${key}` : undefined,
+    image: p.photos?.[0] ? `https://maps.googleapis.com/maps/api/place/photo?maxwidth=1000&photoreference=${p.photos[0].photo_reference}&key=${key}` : undefined,
     categories: p.types,
     description: `Open now • Rating: ${p.rating || 'N/A'} (${p.user_ratings_total || 0} reviews)`,
+  }));
+}
+
+function hashStr(s: string){ let h=0; for(let i=0;i<s.length;i++){ h=(h<<5)-h+s.charCodeAt(i); h|=0; } return Math.abs(h).toString(36); }
+function parseGDate(d: any): string {
+  const raw = (d?.start_date || d?.when || '').toString();
+  const yr = new Date().getFullYear();
+  let t = Date.parse(raw + ' ' + yr);
+  if (isNaN(t)) t = Date.parse(raw);
+  return isNaN(t) ? new Date().toISOString() : new Date(t).toISOString();
+}
+
+// Aggregator: events Google has already collected from across the web AND social
+// (venue sites, Facebook events, ticketing, etc.) — compliant, no scraping on our side.
+// Requires SERPAPI_KEY in Vercel (sign up at serpapi.com).
+async function fromGoogleEvents(city: string, query?: string): Promise<EventItem[]> {
+  const key = process.env.SERPAPI_KEY;
+  if (!key) return [];
+  const q = ((query ? query + ' ' : '') + 'events' + (city ? ' in ' + city : '')).trim();
+  const url = `https://serpapi.com/search.json?engine=google_events&q=${encodeURIComponent(q)}&hl=en&gl=us&api_key=${key}`;
+  const data = await safeFetch(url);
+  const list = data?.events_results || [];
+  return list.slice(0, 40).map((e: any): EventItem => ({
+    id: 'gev_' + hashStr((e.title || '') + (e.date?.start_date || e.date?.when || '')),
+    source: 'google_events',
+    title: e.title,
+    startsAt: parseGDate(e.date),
+    venue: e.venue?.name || (Array.isArray(e.address) ? e.address[0] : undefined),
+    city: Array.isArray(e.address) ? e.address[e.address.length - 1] : city,
+    url: e.link,
+    image: e.thumbnail || e.image,
+    description: e.description,
+    categories: e.ticket_info ? ['Tickets'] : undefined,
   }));
 }
 
@@ -202,25 +235,37 @@ export default async function handler(req: any, res: any) {
     const withinKm = profile.maxDistanceKm || 25;
     const query: string | undefined = body.query;
     
-    const [eb, tm, sg, gp] = await Promise.all([
+    const city = body.location?.city || profile.city || '';
+    const [eb, tm, sg, gp, gev, web] = await Promise.all([
       fromEventbrite(lat, lng, withinKm),
       fromTicketmaster(lat, lng, withinKm),
       fromSeatGeek(lat, lng, withinKm),
       fromGooglePlaces(lat, lng, withinKm),
+      fromGoogleEvents(city, query),
+      kvGet<EventItem[]>('web_events').then(x => x || []).catch(() => []),
     ]);
-    
+
     const seen = new Set<string>();
-    const merged = [...eb, ...tm, ...sg, ...gp].filter(e => {
+    const merged = [...gev, ...web, ...eb, ...tm, ...sg, ...gp].filter(e => {
       const k = (e.title || '') + '|' + (e.startsAt || '');
       if (seen.has(k)) return false;
       seen.add(k);
       return true;
     });
     
+    // Drop events outside the user's selected radius (miles), when we have coordinates.
+    const R = 3959; const rad = (x: number) => x * Math.PI / 180;
+    const inRange = merged.filter((e: any) => {
+      if (e.lat == null || e.lng == null) return true;
+      const dLat = rad(e.lat - lat), dLng = rad(e.lng - lng);
+      const a = Math.sin(dLat/2)**2 + Math.cos(rad(lat)) * Math.cos(rad(e.lat)) * Math.sin(dLng/2)**2;
+      const dist = R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+      return dist <= withinKm * 1.15;
+    });
     // Always prioritize events happening on the day the app is opened.
     const today = new Date().toDateString();
-    const todays = merged.filter(e => { const v = (e as any).startsAt; const t = Date.parse(v || ''); return isNaN(t) ? false : new Date(v).toDateString() === today; });
-    const pool = todays.length >= 6 ? todays : merged;
+    const todays = inRange.filter((e: any) => { const v = e.startsAt; const t = Date.parse(v || ''); return isNaN(t) ? false : new Date(v).toDateString() === today; });
+    const pool = todays.length >= 6 ? todays : inRange;
 
     const { ranked, summary } = await curateWithClaude(profile, pool, query);
 
