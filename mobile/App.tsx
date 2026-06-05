@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { SafeAreaView, View, Text, TextInput, TouchableOpacity, ScrollView, FlatList, Image, ActivityIndicator, StyleSheet, Modal, Platform, KeyboardAvoidingView, Switch, Linking } from 'react-native';
+import { SafeAreaView, View, Text, TextInput, TouchableOpacity, ScrollView, FlatList, Image, ActivityIndicator, StyleSheet, Modal, Platform, KeyboardAvoidingView, Switch, Linking, Share } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as Location from 'expo-location';
 import { StatusBar } from 'expo-status-bar';
@@ -612,6 +612,9 @@ function FriendsScreen({ profile }: any){
       setMsg('Plan updated.');
     } catch { setMsg('Network error.'); }
   }
+  async function shareInvite(){
+    try { await Share.share({ message: `Join me on 5to9 — find the best nightlife & events near you. Add me with code ${me?.code || ''}. Get the app: https://project-ushrm.vercel.app` }); } catch {}
+  }
 
   if (loading) return (
     <View style={{flex:1, backgroundColor: BG}}>
@@ -632,6 +635,7 @@ function FriendsScreen({ profile }: any){
             <TextInput value={addCode} onChangeText={setAddCode} autoCapitalize="characters" autoCorrect={false} placeholder="Enter a friend's code" placeholderTextColor={MUTED} style={[s.input, {flex:1}]}/>
             <TouchableOpacity onPress={addFriend} style={s.townieBtn}><Text style={s.townieBtnTxt}>Add</Text></TouchableOpacity>
           </View>
+          <TouchableOpacity onPress={shareInvite} style={s.igBtn}><Text style={s.igBtnTxt}>Invite friends</Text></TouchableOpacity>
         </View>
 
         <Text style={s.sectionTitle}>Your night</Text>
@@ -669,6 +673,9 @@ function VipScreen(){
   async function loadFeatured(){
     try { const r = await fetch(API_BASE + '/api/featured'); const d = await r.json(); setFeatured(d.events || []); } catch {}
   }
+  async function connectInstagram(){
+    try { const r = await fetch(API_BASE + '/api/social?action=connect'); const d = await r.json(); if (d.url) Linking.openURL(d.url); } catch {}
+  }
   useEffect(() => { loadFeatured(); }, []);
   return (
     <ScrollView style={{flex:1, backgroundColor: BG}} contentContainerStyle={{paddingBottom:120}}>
@@ -702,6 +709,12 @@ function VipScreen(){
           <View style={s.vipPriceRow}><Text style={s.vipPrice}>$10</Text><Text style={s.vipPriceUnit}> / featured event</Text></View>
           <PrimaryBtn label="List your event" onPress={()=>setShowForm(true)}/>
           <Text style={s.vipNote}>Payments are processed securely via PayPal.</Text>
+        </View>
+
+        <Text style={s.sectionTitle}>Auto-post from Instagram</Text>
+        <View style={s.vipCard}>
+          <Text style={s.vipCardSub}>Connect your Instagram business account and the events you post show up in 5to9 automatically — in real time.</Text>
+          <TouchableOpacity onPress={connectInstagram} style={s.igBtn}><Text style={s.igBtnTxt}>Connect Instagram</Text></TouchableOpacity>
         </View>
       </View>
       <EventDetail ev={open} visible={!!open} onClose={()=>setOpen(null)} onSave={()=>setOpen(null)}/>
@@ -935,6 +948,8 @@ const s = StyleSheet.create({
   heartOverlayTxt: { color: ACCENT, fontSize:18, fontWeight:'700' },
   invitePill: { backgroundColor: ACCENT, paddingHorizontal:16, paddingVertical:9, borderRadius:999 },
   invitePillTxt: { color:'#000', fontWeight:'800', fontSize:13 },
+  igBtn: { backgroundColor:'#C13584', borderRadius:12, paddingVertical:14, alignItems:'center', marginTop:12 },
+  igBtnTxt: { color:'#fff', fontWeight:'800', fontSize:15 },
   friendRow: { flexDirection:'row', alignItems:'center', paddingVertical:12, borderBottomWidth:1, borderBottomColor: LINE, gap:12 },
   friendAvatar: { width:46, height:46, borderRadius:23, backgroundColor: CARD, borderWidth:1.5, borderColor: ACCENT, alignItems:'center', justifyContent:'center' },
   friendName: { color: FG, fontSize:16, fontWeight:'700' },
