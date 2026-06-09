@@ -3,6 +3,9 @@
         "version": "1.0.0",
         "description": "NiGHTlife App - Vercel API proxy for Claude AI",
         "private": true,
+        "dependencies": {
+                  "redis": "^4.7.0"
+        },
         "devDependencies": {
                   "typescript": "^5.0.0",
                   "@types/node": "^20.0.0"
