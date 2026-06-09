@@ -8,5 +8,9 @@
                                     { "key": "Access-Control-Allow-Headers", "value": "Content-Type" }
                         ]
               }
+      ],
+      "crons": [
+        { "path": "/api/social?action=refresh", "schedule": "0 17 * * *" },
+        { "path": "/api/crawl?run=1", "schedule": "0 16 * * *" }
       ]
 }
