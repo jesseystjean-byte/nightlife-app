@@ -101,7 +101,35 @@ function fmtPrice(p?: EventItem['price']){
   return '';
 }
 
-async function fetchEvents(profile: Profile, location: {lat:number; lng:number}, query?: string){
+type Loc = { lat: number; lng: number; city?: string };
+
+// Resolve the user's REAL location so we don't default everyone to New York.
+// 1) GPS (with reverse-geocoded city), 2) the city they typed in onboarding,
+// 3) New York only as an absolute last resort.
+async function resolveLocation(profile: Profile): Promise<Loc> {
+  try {
+    const { status } = await Location.requestForegroundPermissionsAsync();
+    if (status === 'granted') {
+      const pos = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced });
+      const ll: Loc = { lat: pos.coords.latitude, lng: pos.coords.longitude };
+      try {
+        const rg = await Location.reverseGeocodeAsync(pos.coords);
+        const c = rg?.[0]?.city || rg?.[0]?.subregion;
+        if (c) ll.city = c;
+      } catch {}
+      return ll;
+    }
+  } catch {}
+  if (profile.city && profile.city.trim()) {
+    try {
+      const g = await Location.geocodeAsync(profile.city.trim());
+      if (g && g[0]) return { lat: g[0].latitude, lng: g[0].longitude, city: profile.city.trim() };
+    } catch {}
+  }
+  return { lat: 40.7128, lng: -74.0060, city: profile.city || 'New York' };
+}
+
+async function fetchEvents(profile: Profile, location: Loc, query?: string){
   try {
     const r = await fetch(API_BASE + '/api/townie', {
       method:'POST',
@@ -355,18 +383,12 @@ function Discover({ profile, onEditProfile, onShowSaved }: any){
   const [saved, setSaved] = useState<string[]>([]);
   const [importing, setImporting] = useState(false);
   const [index, setIndex] = useState(0);
-  const [loc, setLoc] = useState<{lat:number;lng:number}>({lat: 40.7128, lng: -74.0060});
+  const [loc, setLoc] = useState<Loc>({lat: 40.7128, lng: -74.0060});
 
   useEffect(() => { (async () => {
     const sv = await AsyncStorage.getItem(SAVED_KEY);
     if (sv) setSaved(JSON.parse(sv));
-    try {
-      const { status } = await Location.requestForegroundPermissionsAsync();
-      if (status === 'granted') {
-        const pos = await Location.getCurrentPositionAsync({});
-        setLoc({ lat: pos.coords.latitude, lng: pos.coords.longitude });
-      }
-    } catch {}
+    setLoc(await resolveLocation(profile));
   })(); }, []);
   
   async function load(q?: string){
@@ -482,7 +504,7 @@ function SavedList({ profile, onClose }: any){
     const sv = await AsyncStorage.getItem(SAVED_KEY);
     const ids: string[] = sv ? JSON.parse(sv) : [];
     if (ids.length === 0) { setItems([]); return; }
-    const r = await fetchEvents(profile, {lat:40.7128,lng:-74.006});
+    const r = await fetchEvents(profile, await resolveLocation(profile));
     setItems((r.events || []).filter((e: EventItem) => ids.includes(e.id)));
   })(); }, []);
   return (
@@ -515,17 +537,11 @@ function StandoutScreen({ profile, onEditProfile, onShowSaved }: any){
   const [loading, setLoading] = useState(true);
   const [open, setOpen] = useState<EventItem | null>(null);
   const [saved, setSaved] = useState<string[]>([]);
-  const [loc, setLoc] = useState<{lat:number;lng:number}>({lat: 40.7128, lng: -74.0060});
+  const [loc, setLoc] = useState<Loc>({lat: 40.7128, lng: -74.0060});
   useEffect(() => { (async () => {
     const sv = await AsyncStorage.getItem(SAVED_KEY);
     if (sv) setSaved(JSON.parse(sv));
-    try {
-      const { status } = await Location.requestForegroundPermissionsAsync();
-      if (status === 'granted') {
-        const pos = await Location.getCurrentPositionAsync({});
-        setLoc({ lat: pos.coords.latitude, lng: pos.coords.longitude });
-      }
-    } catch {}
+    setLoc(await resolveLocation(profile));
   })(); }, []);
   useEffect(() => { (async () => {
     setLoading(true);
