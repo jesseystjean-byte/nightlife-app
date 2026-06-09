@@ -40,11 +40,11 @@ async function safeFetch(url: string, opts?: any): Promise<any> {
   } catch { return null; }
 }
 
-async function fromEventbrite(lat: number, lng: number, withinKm: number): Promise<EventItem[]> {
+async function fromEventbrite(lat: number, lng: number, withinKm: number, kw?: string): Promise<EventItem[]> {
   const token = process.env.EVENTBRITE_TOKEN;
   if (!token) return [];
   // Eventbrite public search endpoint
-  const url = `https://www.eventbriteapi.com/v3/events/search/?location.latitude=${lat}&location.longitude=${lng}&location.within=${Math.round(withinKm * 1.609)}km&expand=venue,ticket_availability&token=${token}`;
+  const url = `https://www.eventbriteapi.com/v3/events/search/?location.latitude=${lat}&location.longitude=${lng}&location.within=${Math.round(withinKm * 1.609)}km${kw ? '&q=' + encodeURIComponent(kw) : ''}&expand=venue,ticket_availability&token=${token}`;
   const data = await safeFetch(url);
   if (!data?.events) return [];
   return data.events.slice(0, 30).map((e: any): EventItem => ({
@@ -64,10 +64,10 @@ async function fromEventbrite(lat: number, lng: number, withinKm: number): Promi
   }));
 }
 
-async function fromTicketmaster(lat: number, lng: number, withinKm: number): Promise<EventItem[]> {
+async function fromTicketmaster(lat: number, lng: number, withinKm: number, kw?: string): Promise<EventItem[]> {
   const key = process.env.TICKETMASTER_KEY;
   if (!key) return [];
-  const url = `https://app.ticketmaster.com/discovery/v2/events.json?latlong=${lat},${lng}&radius=${Math.round(withinKm)}&unit=miles&size=40&apikey=${key}`;
+  const url = `https://app.ticketmaster.com/discovery/v2/events.json?latlong=${lat},${lng}&radius=${Math.round(withinKm)}&unit=miles&size=40${kw ? '&keyword=' + encodeURIComponent(kw) : ''}&apikey=${key}`;
   const data = await safeFetch(url);
   const events = data?._embedded?.events || [];
   return events.map((e: any): EventItem => ({
@@ -87,10 +87,10 @@ async function fromTicketmaster(lat: number, lng: number, withinKm: number): Pro
   }));
 }
 
-async function fromSeatGeek(lat: number, lng: number, withinKm: number): Promise<EventItem[]> {
+async function fromSeatGeek(lat: number, lng: number, withinKm: number, kw?: string): Promise<EventItem[]> {
   const id = process.env.SEATGEEK_CLIENT_ID;
   if (!id) return [];
-  const url = `https://api.seatgeek.com/2/events?lat=${lat}&lon=${lng}&range=${Math.round(withinKm)}mi&per_page=40&client_id=${id}`;
+  const url = `https://api.seatgeek.com/2/events?lat=${lat}&lon=${lng}&range=${Math.round(withinKm)}mi&per_page=40${kw ? '&q=' + encodeURIComponent(kw) : ''}&client_id=${id}`;
   const data = await safeFetch(url);
   const events = data?.events || [];
   return events.map((e: any): EventItem => ({
@@ -177,14 +177,32 @@ async function curateWithClaude(profile: Profile, events: EventItem[], query?: s
     price: e.price, description: e.description?.slice(0, 200),
   }));
   
-  const prompt = `You are 5to9's event curator for ALL kinds of going-out — not just concerts and shows, but sports watch parties, reality-TV viewing nights, thrift/vintage pop-ups, pick-up sports, run clubs, trivia nights, comedy, drag, art walks, markets and food events — every kind of local happening.
-Rank these events for this user and give a short personal note for each. Distances are in miles. Strongly prefer events happening TODAY, and reward variety of event type (don't return only concerts).
+  const prompt = `You are 5to9's event curator. 5to9 is an EVENT FINDER, never a bar or venue finder.
+It covers EVERY kind of going-out and EVERY demographic — not just concerts and shows, but sports
+watch parties, reality-TV viewing nights, thrift/vintage pop-ups, pick-up sports, run clubs, trivia
+nights, comedy, drag, art walks, markets, food crawls, book clubs, gaming meetups, faith/cultural
+events, family days, queer nights, 21+ parties — every kind of specific, dated local happening.
+
+YOUR JOB: pick the events that best fit THIS person's specific interests AND their demographic, and
+write a one-sentence personal note for each.
+
+HARD RULES:
+- ONLY return items that are a specific, dated EVENT. If an item is really just a bar/restaurant/club
+  /venue listing with no actual event (e.g. "Open now • Rating 4.2"), DROP it — give it score 0 and
+  leave it out of "ranked".
+- Match each of the user's interests to concrete events. Try to cover MORE THAN ONE of their interests
+  rather than 25 versions of the same thing — reward variety of event type.
+- Factor in demographics from the profile (age, gender, relationship status, who they go out with,
+  crowd/vibe they want). A 21-year-old wanting a rowdy crowd and a 40-year-old wanting a chill date
+  night should get different picks from the same list.
+- Strongly prefer events happening TODAY. Distances are in miles.
+
 USER PROFILE: ${JSON.stringify(profile)}
 USER QUERY: ${query || '(none)'}
 EVENTS: ${JSON.stringify(compact)}
 
-Reply ONLY with JSON of shape: { "summary": "1-2 sentence vibe summary", "ranked": [{ "id": "...", "score": 0-100, "why": "personal note 1 sentence" }, ...] }
-Top 25 only. Score by interest match, vibe fit, variety of event type, time fit, price fit.`;
+Reply ONLY with JSON: { "summary": "1-2 sentence vibe summary", "ranked": [{ "id": "...", "score": 0-100, "why": "personal note tied to their interest/demographic, 1 sentence" }, ...] }
+Top 25 only, best first. Score = interest match + demographic fit + variety + time fit + price fit. Exclude non-events.`;
 
   try {
     const r = await fetch('https://api.anthropic.com/v1/messages', {
@@ -236,17 +254,38 @@ export default async function handler(req: any, res: any) {
     const query: string | undefined = body.query;
     
     const city = body.location?.city || profile.city || '';
-    const [eb, tm, sg, gp, gev, web] = await Promise.all([
-      fromEventbrite(lat, lng, withinKm),
-      fromTicketmaster(lat, lng, withinKm),
-      fromSeatGeek(lat, lng, withinKm),
-      fromGooglePlaces(lat, lng, withinKm),
-      fromGoogleEvents(city, query),
-      kvGet<EventItem[]>('web_events').then(x => x || []).catch(() => []),
-    ]);
 
+    // INTEREST-DRIVEN SEARCH — instead of one generic "nearby" sweep, query every source
+    // ONCE PER INTEREST (run club, trivia, techno, drag, thrift pop-up, pick-up soccer, …)
+    // so we surface SPECIFIC events for each thing this user cares about, not just whatever
+    // happens to be closest. A blank keyword sweep is kept so we never miss general listings.
+    const interests: string[] = Array.isArray(profile.interests) ? profile.interests.filter(Boolean) : [];
+    const keywords: (string | undefined)[] = query
+      ? [query]
+      : [undefined, ...interests.slice(0, 6)]; // undefined = unfiltered nearby sweep
+
+    const dedup = <T extends EventItem>(arr: T[]) => {
+      const s = new Set<string>(); const out: T[] = [];
+      for (const e of arr) { const k = 'id:' + e.id; if (!s.has(k)) { s.add(k); out.push(e); } }
+      return out;
+    };
+
+    const batches = await Promise.all(keywords.map(kw => Promise.all([
+      fromEventbrite(lat, lng, withinKm, kw),
+      fromTicketmaster(lat, lng, withinKm, kw),
+      fromSeatGeek(lat, lng, withinKm, kw),
+      fromGoogleEvents(city, kw),
+    ])));
+    const eb = dedup(batches.flatMap(b => b[0]));
+    const tm = dedup(batches.flatMap(b => b[1]));
+    const sg = dedup(batches.flatMap(b => b[2]));
+    const gev = dedup(batches.flatMap(b => b[3]));
+    const web = await kvGet<EventItem[]>('web_events').then(x => x || []).catch(() => []);
+
+    // EVENT FINDER — only real, dated events. (Google Places venue search removed:
+    // it returned bars/nightclubs, which made the app a location finder, not an event finder.)
     const seen = new Set<string>();
-    const merged = [...gev, ...web, ...eb, ...tm, ...sg, ...gp].filter(e => {
+    const merged = [...gev, ...web, ...eb, ...tm, ...sg].filter(e => {
       const k = (e.title || '') + '|' + (e.startsAt || '');
       if (seen.has(k)) return false;
       seen.add(k);
@@ -284,7 +323,7 @@ export default async function handler(req: any, res: any) {
     res.status(200).json({
       events: finalEvents,
       summary,
-      sources: { eventbrite: eb.length, ticketmaster: tm.length, seatgeek: sg.length, googlePlaces: gp.length, featured: featured.length },
+      sources: { eventbrite: eb.length, ticketmaster: tm.length, seatgeek: sg.length, googleEvents: gev.length, website: web.length, featured: featured.length },
     });
   } catch (err: any) {
     res.status(500).json({ error: err?.message || 'server error' });
