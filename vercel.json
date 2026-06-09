@@ -10,7 +10,7 @@
               }
       ],
       "crons": [
-        { "path": "/api/social?action=refresh", "schedule": "0 17 * * *" },
-        { "path": "/api/crawl?run=1", "schedule": "0 16 * * *" }
+        { "path": "/api/social?action=refresh", "schedule": "*/5 * * * *" },
+        { "path": "/api/crawl?run=1", "schedule": "0 * * * *" }
       ]
 }
