@@ -1,36 +1,48 @@
 // api/_store.ts
-// Tiny persistence helper backed by Vercel KV / Upstash Redis REST.
-// Provision: Vercel dashboard -> Storage -> KV (or Upstash) -> it injects
-// KV_REST_API_URL and KV_REST_API_TOKEN env vars automatically.
-// If those env vars are absent, every call is a safe no-op so the app still runs
-// (featured events just won't persist until KV is connected).
+// Tiny persistence helper backed by the project's Vercel Redis store (node-redis).
+// The Vercel "Redis" integration injects a single connection string: KV_REDIS_URL
+// (a redis://... URL). We reuse one client across warm invocations.
+// If the URL is absent, every call is a safe no-op so the app still runs
+// (featured/social/crawler events just won't persist until Redis is connected).
 
-const URL = process.env.KV_REST_API_URL || '';
-const TOKEN = process.env.KV_REST_API_TOKEN || '';
+import { createClient } from 'redis';
 
-export function kvEnabled(): boolean { return !!(URL && TOKEN); }
+const REDIS_URL = process.env.KV_REDIS_URL || process.env.REDIS_URL || '';
+
+let client: ReturnType<typeof createClient> | null = null;
+let connecting: Promise<any> | null = null;
+
+export function kvEnabled(): boolean { return !!REDIS_URL; }
+
+async function getClient() {
+  if (!REDIS_URL) return null;
+  if (client && (client as any).isOpen) return client;
+  if (!client) {
+    client = createClient({ url: REDIS_URL });
+    client.on('error', () => { /* swallow; calls fall back to no-op */ });
+  }
+  if (!(client as any).isOpen) {
+    connecting = connecting || client.connect();
+    try { await connecting; } finally { connecting = null; }
+  }
+  return client;
+}
 
 export async function kvGet<T = any>(key: string): Promise<T | null> {
-  if (!kvEnabled()) return null;
   try {
-    const r = await fetch(`${URL}/get/${encodeURIComponent(key)}`, {
-      headers: { Authorization: `Bearer ${TOKEN}` },
-    });
-    if (!r.ok) return null;
-    const d = await r.json();
-    if (d.result == null) return null;
-    try { return JSON.parse(d.result) as T; } catch { return d.result as T; }
+    const c = await getClient();
+    if (!c) return null;
+    const v = await c.get(key);
+    if (v == null) return null;
+    try { return JSON.parse(v) as T; } catch { return v as unknown as T; }
   } catch { return null; }
 }
 
 export async function kvSet(key: string, value: any): Promise<boolean> {
-  if (!kvEnabled()) return false;
   try {
-    const r = await fetch(`${URL}/set/${encodeURIComponent(key)}`, {
-      method: 'POST',
-      headers: { Authorization: `Bearer ${TOKEN}`, 'content-type': 'application/json' },
-      body: JSON.stringify(value),
-    });
-    return r.ok;
+    const c = await getClient();
+    if (!c) return false;
+    await c.set(key, JSON.stringify(value));
+    return true;
   } catch { return false; }
 }
