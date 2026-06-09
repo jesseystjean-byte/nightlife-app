@@ -167,6 +167,33 @@ async function fromGoogleEvents(city: string, query?: string): Promise<EventItem
   }));
 }
 
+// Crisp, type-based fallback images. Source images from Google Events (and some social
+// posts) come back as tiny, blurry thumbnails; we swap those for a clean stock image that
+// matches the event type so every card looks sharp. Real high-res images (Ticketmaster /
+// SeatGeek / Eventbrite) are kept as-is.
+const IMG = (id: string) => `https://images.unsplash.com/${id}?auto=format&fit=crop&w=900&q=80`;
+const TYPE_IMAGES: { re: RegExp; url: string }[] = [
+  { re: /concert|music|dj|band|festival|rave|techno|hip.?hop|jazz|live music/, url: IMG('photo-1470229722913-7c0e2dbbafd3') },
+  { re: /watch party|game day|sports|nba|nfl|soccer|basketball|football|pick.?up/, url: IMG('photo-1461896836934-ffe607ba8211') },
+  { re: /comedy|stand.?up|open mic|improv/, url: IMG('photo-1585699324551-f6c309eedeca') },
+  { re: /party|club|nightlife|dance/, url: IMG('photo-1514525253161-7a46d19cd819') },
+  { re: /food|dinner|brunch|tasting|restaurant|wine|beer|brewery/, url: IMG('photo-1414235077428-338989a2e8c0') },
+  { re: /art|gallery|paint|exhibit|museum/, url: IMG('photo-1531058020387-3be344556be6') },
+  { re: /trivia|game night|board game|bingo|quiz/, url: IMG('photo-1611996575749-79a3a250f948') },
+  { re: /thrift|pop.?up|market|vintage|flea|craft fair/, url: IMG('photo-1488459716781-31db52582fe9') },
+  { re: /run club|running|fitness|yoga|workout|cycle/, url: IMG('photo-1517649763962-0c623066013b') },
+  { re: /theat|play|musical|broadway|drag|cabaret/, url: IMG('photo-1507924538820-ede94a04019d') },
+];
+const DEFAULT_IMG = IMG('photo-1492684223066-81342ee5ff30');
+function bestImage(e: EventItem): string {
+  const has = !!(e.image && /^https?:\/\//.test(e.image));
+  const lowRes = e.source === 'google_events' || e.source === 'social';
+  if (has && !lowRes) return e.image as string;          // trust real high-res sources
+  const hay = ((e.categories || []).join(' ') + ' ' + (e.title || '')).toLowerCase();
+  for (const t of TYPE_IMAGES) if (t.re.test(hay)) return t.url;
+  return has ? (e.image as string) : DEFAULT_IMG;        // keep original over nothing
+}
+
 async function curateWithClaude(profile: Profile, events: EventItem[], query?: string): Promise<{ ranked: EventItem[]; summary: string }> {
   const key = process.env.ANTHROPIC_API_KEY;
   if (!key || events.length === 0) return { ranked: events, summary: '' };
@@ -260,26 +287,56 @@ export default async function handler(req: any, res: any) {
     // so we surface SPECIFIC events for each thing this user cares about, not just whatever
     // happens to be closest. A blank keyword sweep is kept so we never miss general listings.
     const interests: string[] = Array.isArray(profile.interests) ? profile.interests.filter(Boolean) : [];
-    const keywords: (string | undefined)[] = query
-      ? [query]
-      : [undefined, ...interests.slice(0, 6)]; // undefined = unfiltered nearby sweep
+
+    // Event TYPES 5to9 always hunts for, so niche going-out (watch parties, reality-TV
+    // nights, thrift pop-ups, run clubs, trivia, pick-up sports) shows up even when the
+    // user never listed them as an interest. This is what makes it an event finder for
+    // EVERY kind of happening rather than only the user's stated tags.
+    const EVENT_TYPE_SEEDS = [
+      'sports watch party', 'reality tv watch party', 'trivia night', 'run club',
+      'thrift pop-up', 'pick-up sports', 'comedy open mic', 'drag show',
+      'live music', 'art walk', 'food festival', 'book club', 'game night',
+    ];
 
     const dedup = <T extends EventItem>(arr: T[]) => {
       const s = new Set<string>(); const out: T[] = [];
       for (const e of arr) { const k = 'id:' + e.id; if (!s.has(k)) { s.add(k); out.push(e); } }
       return out;
     };
+    // De-dupe a keyword list while keeping a single "undefined" (unfiltered) sweep.
+    const uniqKw = (arr: (string | undefined)[]) => {
+      const s = new Set<string>(); const out: (string | undefined)[] = [];
+      for (const k of arr) { const key = (k ?? '__all__').toLowerCase(); if (!s.has(key)) { s.add(key); out.push(k); } }
+      return out;
+    };
+    // Rotate through the seed list across the day so all types get covered over time.
+    const off = new Date().getHours();
+    const pick = (arr: string[], n: number) =>
+      arr.length ? Array.from({ length: Math.min(n, arr.length) }, (_, i) => arr[(off + i) % arr.length]) : [];
 
-    const batches = await Promise.all(keywords.map(kw => Promise.all([
-      fromEventbrite(lat, lng, withinKm, kw),
-      fromTicketmaster(lat, lng, withinKm, kw),
-      fromSeatGeek(lat, lng, withinKm, kw),
-      fromGoogleEvents(city, kw),
-    ])));
-    const eb = dedup(batches.flatMap(b => b[0]));
-    const tm = dedup(batches.flatMap(b => b[1]));
-    const sg = dedup(batches.flatMap(b => b[2]));
-    const gev = dedup(batches.flatMap(b => b[3]));
+    // Cheap, high-quota sources (Ticketmaster / SeatGeek / Eventbrite): fan out widely.
+    const cheapKeywords = query ? [query] : uniqKw([undefined, ...interests, ...EVENT_TYPE_SEEDS]);
+
+    // Google Events runs on SerpApi (metered — free plan ~250 searches/mo, 1 per query).
+    // Keep this short but ALWAYS include "watch party" + the user's top interests, plus a
+    // rotating slice of the other niche types, so watch parties reliably appear without
+    // draining the quota in a single request.
+    const gevKeywords = query
+      ? [query]
+      : uniqKw([undefined, 'watch party', ...interests.slice(0, 2), ...pick(EVENT_TYPE_SEEDS, 3)]);
+
+    const [cheapBatches, gevResults] = await Promise.all([
+      Promise.all(cheapKeywords.map(kw => Promise.all([
+        fromEventbrite(lat, lng, withinKm, kw),
+        fromTicketmaster(lat, lng, withinKm, kw),
+        fromSeatGeek(lat, lng, withinKm, kw),
+      ]))),
+      Promise.all(gevKeywords.map(kw => fromGoogleEvents(city, kw))),
+    ]);
+    const eb = dedup(cheapBatches.flatMap(b => b[0]));
+    const tm = dedup(cheapBatches.flatMap(b => b[1]));
+    const sg = dedup(cheapBatches.flatMap(b => b[2]));
+    const gev = dedup(gevResults.flat());
     const web = await kvGet<EventItem[]>('web_events').then(x => x || []).catch(() => []);
 
     // EVENT FINDER — only real, dated events. (Google Places venue search removed:
@@ -290,7 +347,7 @@ export default async function handler(req: any, res: any) {
       if (seen.has(k)) return false;
       seen.add(k);
       return true;
-    });
+    }).map(e => ({ ...e, image: bestImage(e) }));  // crisp type-based images, no blurry thumbs
     
     // Drop events outside the user's selected radius (miles), when we have coordinates.
     const R = 3959; const rad = (x: number) => x * Math.PI / 180;
