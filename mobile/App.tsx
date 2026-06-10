@@ -101,11 +101,11 @@ function fmtPrice(p?: EventItem['price']){
   return '';
 }
 
-type Loc = { lat: number; lng: number; city?: string };
+type Loc = { lat?: number; lng?: number; city?: string };
 
-// Resolve the user's REAL location so we don't default everyone to New York.
-// 1) GPS (with reverse-geocoded city), 2) the city they typed in onboarding,
-// 3) New York only as an absolute last resort.
+// Resolve the user's REAL location. GPS first (most precise, with a reverse-geocoded city);
+// otherwise the city they entered in onboarding. We NEVER fabricate New York coordinates — if
+// we only have a city name we send that and let the backend resolve it.
 async function resolveLocation(profile: Profile): Promise<Loc> {
   try {
     const { status } = await Location.requestForegroundPermissionsAsync();
@@ -120,13 +120,27 @@ async function resolveLocation(profile: Profile): Promise<Loc> {
       return ll;
     }
   } catch {}
-  if (profile.city && profile.city.trim()) {
+  const city = (profile.city || '').trim();
+  if (city) {
     try {
-      const g = await Location.geocodeAsync(profile.city.trim());
-      if (g && g[0]) return { lat: g[0].latitude, lng: g[0].longitude, city: profile.city.trim() };
+      const g = await Location.geocodeAsync(city);
+      if (g && g[0]) return { lat: g[0].latitude, lng: g[0].longitude, city };
     } catch {}
+    return { city };           // no coords — backend maps the city, never NYC by default
   }
-  return { lat: 40.7128, lng: -74.0060, city: profile.city || 'New York' };
+  return {};
+}
+
+// Shared hook so every screen (Discover, Standouts, Saved) resolves location identically and
+// only fetches once it's known — no screen silently shows New York while waiting.
+function useResolvedLocation(profile: Profile): Loc | null {
+  const [loc, setLoc] = useState<Loc | null>(null);
+  useEffect(() => {
+    let alive = true;
+    (async () => { const l = await resolveLocation(profile); if (alive) setLoc(l); })();
+    return () => { alive = false; };
+  }, [profile?.city]);
+  return loc;
 }
 
 async function fetchEvents(profile: Profile, location: Loc, query?: string){
@@ -383,15 +397,15 @@ function Discover({ profile, onEditProfile, onShowSaved }: any){
   const [saved, setSaved] = useState<string[]>([]);
   const [importing, setImporting] = useState(false);
   const [index, setIndex] = useState(0);
-  const [loc, setLoc] = useState<Loc>({lat: 40.7128, lng: -74.0060});
+  const loc = useResolvedLocation(profile);
 
   useEffect(() => { (async () => {
     const sv = await AsyncStorage.getItem(SAVED_KEY);
     if (sv) setSaved(JSON.parse(sv));
-    setLoc(await resolveLocation(profile));
   })(); }, []);
-  
+
   async function load(q?: string){
+    if (!loc) return;
     setLoading(true);
     const r = await fetchEvents(profile, loc, q);
     const impRaw = await AsyncStorage.getItem(IMPORTED_KEY);
@@ -436,7 +450,7 @@ function Discover({ profile, onEditProfile, onShowSaved }: any){
     setEvents(prev => [ev, ...prev.filter(e => e.id !== ev.id)]);
     setOpen(ev);
   }
-  useEffect(() => { load(); }, [loc.lat, loc.lng]);
+  useEffect(() => { if (loc) load(); }, [loc?.lat, loc?.lng, loc?.city]);
   
   async function toggleSave(id: string){
     const next = saved.includes(id) ? saved.filter(x => x !== id) : [...saved, id];
@@ -537,19 +551,18 @@ function StandoutScreen({ profile, onEditProfile, onShowSaved }: any){
   const [loading, setLoading] = useState(true);
   const [open, setOpen] = useState<EventItem | null>(null);
   const [saved, setSaved] = useState<string[]>([]);
-  const [loc, setLoc] = useState<Loc>({lat: 40.7128, lng: -74.0060});
+  const loc = useResolvedLocation(profile);
   useEffect(() => { (async () => {
     const sv = await AsyncStorage.getItem(SAVED_KEY);
     if (sv) setSaved(JSON.parse(sv));
-    setLoc(await resolveLocation(profile));
   })(); }, []);
-  useEffect(() => { (async () => {
+  useEffect(() => { if (!loc) return; (async () => {
     setLoading(true);
     const r = await fetchEvents(profile, loc);
     const list = (r.events || []).slice().sort((a: EventItem, b: EventItem) => popularityScore(b) - popularityScore(a));
     setEvents(list);
     setLoading(false);
-  })(); }, [loc.lat, loc.lng]);
+  })(); }, [loc?.lat, loc?.lng, loc?.city]);
   async function toggleSave(id: string){
     const next = saved.includes(id) ? saved.filter(x => x !== id) : [...saved, id];
     setSaved(next);
