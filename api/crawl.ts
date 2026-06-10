@@ -29,26 +29,29 @@ type EventItem = {
 // Localist-powered (.edu) calendars and the DoStuff/EverOut nightlife networks are the most
 // reliable JSON-LD emitters; tourism/city pages are included as bonus coverage.
 const SEED_SITES: string[] = [
-  // Seattle
+  // Seattle (DoStuff/EverOut nightlife networks + venue calendars)
   'https://everout.com/seattle/events/',
   'https://www.thestranger.com/events',
-  'https://art.washington.edu/calendar',
-  'https://www.seattlecenter.com/events/calendar-of-events',
-  'https://visitseattle.org/events/',
-  // Boston
+  'https://townhallseattle.org/events/',
+  'https://www.washington.edu/calendar/',
+  // Boston (Localist-powered .edu calendars + city event network — reliable JSON-LD)
   'https://www.thebostoncalendar.com/events',
   'https://calendar.bu.edu/',
   'https://calendar.northeastern.edu/',
-  'https://www.boston.gov/events',
-  // New York City
+  'https://calendar.mit.edu/',
+  'https://calendar.tufts.edu/',
+  'https://www.emerson.edu/calendar',
+  // New York City (Localist-powered .edu calendars)
   'https://events.columbia.edu/',
-  'https://www.nycgo.com/events/',
-  'https://www.amny.com/things-to-do/',
-  // Chicago
+  'https://events.nyu.edu/',
+  'https://calendar.fordham.edu/',
+  'https://calendar.pace.edu/',
+  // Chicago (DoStuff network + Localist-powered .edu calendars)
   'https://do312.com/events',
   'https://events.uchicago.edu/',
-  'https://www.choosechicago.com/events/',
-  'https://www.chicago.gov/city/en/depts/dca/supp_info/department_of_culturalaffairsspecialeventscalendar.html',
+  'https://events.depaul.edu/',
+  'https://planitpurple.northwestern.edu/',
+  'https://www.iit.edu/events',
 ];
 
 function hashStr(s: string){ let h = 0; for (let i=0;i<s.length;i++){ h=(h<<5)-h+s.charCodeAt(i); h|=0; } return Math.abs(h).toString(36); }
