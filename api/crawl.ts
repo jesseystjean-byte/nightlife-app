@@ -28,30 +28,26 @@ type EventItem = {
 // reading them is compliant — no social networks, no auth walls, no ToS circumvention.
 // Localist-powered (.edu) calendars and the DoStuff/EverOut nightlife networks are the most
 // reliable JSON-LD emitters; tourism/city pages are included as bonus coverage.
+// (1) Sites whose index pages embed Schema.org Event JSON-LD (nightlife / city networks).
 const SEED_SITES: string[] = [
-  // Seattle (DoStuff/EverOut nightlife networks + venue calendars)
   'https://everout.com/seattle/events/',
   'https://www.thestranger.com/events',
   'https://townhallseattle.org/events/',
-  'https://www.washington.edu/calendar/',
-  // Boston (Localist-powered .edu calendars + city event network — reliable JSON-LD)
   'https://www.thebostoncalendar.com/events',
-  'https://calendar.bu.edu/',
-  'https://calendar.northeastern.edu/',
-  'https://calendar.mit.edu/',
-  'https://calendar.tufts.edu/',
-  'https://www.emerson.edu/calendar',
-  // New York City (Localist-powered .edu calendars)
-  'https://events.columbia.edu/',
-  'https://events.nyu.edu/',
-  'https://calendar.fordham.edu/',
-  'https://calendar.pace.edu/',
-  // Chicago (DoStuff network + Localist-powered .edu calendars)
   'https://do312.com/events',
-  'https://events.uchicago.edu/',
-  'https://events.depaul.edu/',
-  'https://planitpurple.northwestern.edu/',
-  'https://www.iit.edu/events',
+];
+// (2) Localist-powered calendars. Their index pages DON'T list events as JSON-LD, but every
+// Localist site exposes a documented public JSON API at /api/2/events built for consumption.
+// We query that directly — far higher yield than scraping the page, still fully compliant.
+const LOCALIST_BASES: string[] = [
+  // Boston
+  'https://calendar.bu.edu', 'https://calendar.northeastern.edu',
+  'https://calendar.mit.edu', 'https://calendar.tufts.edu',
+  // New York City
+  'https://events.columbia.edu', 'https://events.nyu.edu',
+  'https://calendar.fordham.edu', 'https://calendar.pace.edu',
+  // Chicago
+  'https://events.uchicago.edu', 'https://events.depaul.edu',
 ];
 
 function hashStr(s: string){ let h = 0; for (let i=0;i<s.length;i++){ h=(h<<5)-h+s.charCodeAt(i); h|=0; } return Math.abs(h).toString(36); }
@@ -124,6 +120,45 @@ async function crawlSite(url: string): Promise<EventItem[]> {
   return events;
 }
 
+// Localist public events API: GET <base>/api/2/events?days=45&pp=100 -> JSON of events.
+async function crawlLocalist(base: string): Promise<EventItem[]> {
+  try {
+    const r = await fetch(`${base}/api/2/events?days=45&pp=100`, {
+      headers: { 'user-agent': '5to9-eventbot/1.0 (reads public Localist API)', accept: 'application/json' },
+    });
+    if (!r.ok) return [];
+    const data = await r.json();
+    const items: any[] = data?.events || [];
+    const out: EventItem[] = [];
+    for (const it of items) {
+      const ev = it?.event;
+      if (!ev) continue;
+      const inst = ev.event_instances?.[0]?.event_instance;
+      const start = inst?.start || ev.first_date;
+      if (!ev.title || !start) continue;
+      const types = (ev.filters?.event_types || []).map((t: any) => t.name).filter(Boolean);
+      const cost = String(ev.ticket_cost || '');
+      out.push({
+        id: 'web_loc_' + ev.id,
+        source: 'website',
+        title: String(ev.title).slice(0, 160),
+        startsAt: start,
+        endsAt: inst?.end,
+        venue: ev.location_name || ev.geo?.city || undefined,
+        city: ev.geo?.city || undefined,
+        lat: ev.geo?.latitude ? parseFloat(ev.geo.latitude) : undefined,
+        lng: ev.geo?.longitude ? parseFloat(ev.geo.longitude) : undefined,
+        url: ev.localist_url || ev.url || undefined,
+        image: ev.photo_url || undefined,
+        price: ev.free ? { free: true } : (/\d/.test(cost) ? { min: parseFloat(cost.replace(/[^0-9.]/g, '')) || undefined, currency: 'USD' } : undefined),
+        categories: types.length ? types : undefined,
+        description: ev.description_text ? String(ev.description_text).slice(0, 600) : undefined,
+      });
+    }
+    return out;
+  } catch { return []; }
+}
+
 export default async function handler(req: any, res: any){
   cors(res);
   if (req.method === 'OPTIONS') { res.status(200).end(); return; }
@@ -150,23 +185,26 @@ export default async function handler(req: any, res: any){
     }
     if (action === 'list') {
       const manual = (await kvGet<string[]>('venue_sites')) || [];
-      res.status(200).json({ seeds: SEED_SITES, manual, sites: Array.from(new Set([...SEED_SITES, ...manual])) }); return;
+      res.status(200).json({ jsonLd: SEED_SITES, localist: LOCALIST_BASES, manual }); return;
     }
     if (action === 'run') {
       const manual = (await kvGet<string[]>('venue_sites')) || [];
-      const sites = Array.from(new Set([...SEED_SITES, ...manual]));
-      // Crawl all sites in parallel (each failure is isolated and ignored).
-      const results = await Promise.all(sites.map(site => crawlSite(site).catch(() => [] as EventItem[])));
+      const jsonLdSites = Array.from(new Set([...SEED_SITES, ...manual]));
+      // Crawl JSON-LD pages and Localist APIs in parallel; each failure is isolated.
+      const [jsonLdResults, localistResults] = await Promise.all([
+        Promise.all(jsonLdSites.map(s => crawlSite(s).catch(() => [] as EventItem[]))),
+        Promise.all(LOCALIST_BASES.map(b => crawlLocalist(b).catch(() => [] as EventItem[]))),
+      ]);
       const all: EventItem[] = [];
       const seen = new Set<string>();
-      for (const evs of results) {
+      for (const evs of [...jsonLdResults, ...localistResults]) {
         for (const e of evs) { if (!seen.has(e.id)) { seen.add(e.id); all.push(e); } }
       }
       // keep only upcoming / today (drop past events)
       const now = Date.now();
-      const upcoming = all.filter(e => { const t = Date.parse(e.startsAt); return isNaN(t) || t > now - 12 * 3600 * 1000; }).slice(0, 500);
+      const upcoming = all.filter(e => { const t = Date.parse(e.startsAt); return isNaN(t) || t > now - 12 * 3600 * 1000; }).slice(0, 800);
       await kvSet('web_events', upcoming);
-      res.status(200).json({ ok: true, crawled: sites.length, events: upcoming.length }); return;
+      res.status(200).json({ ok: true, crawled: jsonLdSites.length + LOCALIST_BASES.length, events: upcoming.length }); return;
     }
 
     res.status(400).json({ error: 'Unknown action' });
