@@ -32,6 +32,22 @@ type EventItem = {
   categories?: string[]; description?: string;
 };
 
+// City -> [lat, lng] so we can anchor the search when GPS isn't available, WITHOUT silently
+// defaulting everyone to New York. Covers launch cities + major US metros; extend freely.
+const CITY_COORDS: Record<string, [number, number]> = {
+  'seattle': [47.6062, -122.3321], 'boston': [42.3601, -71.0589],
+  'new york': [40.7128, -74.0060], 'new york city': [40.7128, -74.0060], 'nyc': [40.7128, -74.0060],
+  'manhattan': [40.7831, -73.9712], 'brooklyn': [40.6782, -73.9442],
+  'chicago': [41.8781, -87.6298], 'los angeles': [34.0522, -118.2437], 'la': [34.0522, -118.2437],
+  'san francisco': [37.7749, -122.4194], 'sf': [37.7749, -122.4194], 'oakland': [37.8044, -122.2712],
+  'austin': [30.2672, -97.7431], 'denver': [39.7392, -104.9903], 'portland': [45.5152, -122.6784],
+  'washington': [38.9072, -77.0369], 'washington dc': [38.9072, -77.0369], 'dc': [38.9072, -77.0369],
+  'philadelphia': [39.9526, -75.1652], 'miami': [25.7617, -80.1918], 'atlanta': [33.7490, -84.3880],
+  'dallas': [32.7767, -96.7970], 'houston': [29.7604, -95.3698], 'phoenix': [33.4484, -112.0740],
+  'san diego': [32.7157, -117.1611], 'nashville': [36.1627, -86.7816], 'new orleans': [29.9511, -90.0715],
+  'minneapolis': [44.9778, -93.2650], 'detroit': [42.3314, -83.0458], 'cambridge': [42.3736, -71.1097],
+};
+
 async function safeFetch(url: string, opts?: any): Promise<any> {
   try {
     const r = await fetch(url, opts);
@@ -224,6 +240,11 @@ HARD RULES:
   crowd/vibe they want). A 21-year-old wanting a rowdy crowd and a 40-year-old wanting a chill date
   night should get different picks from the same list.
 - Strongly prefer events happening TODAY. Distances are in miles.
+- EXACT SEARCH: if USER QUERY is set, the user is explicitly asking for something specific
+  (an artist, team, genre, venue, or event type like "drag brunch" or "Celtics watch party").
+  Return ONLY events that genuinely match that query, rank the closest matches first, and do
+  NOT pad the list with unrelated events. If nothing matches well, return few or none rather
+  than filler. When USER QUERY is empty, use the profile to personalize as usual.
 
 USER PROFILE: ${JSON.stringify(profile)}
 USER QUERY: ${query || '(none)'}
@@ -276,12 +297,20 @@ export default async function handler(req: any, res: any) {
   try {
     const body = typeof req.body === 'string' ? JSON.parse(req.body) : (req.body || {});
     const profile: Profile = body.profile || {};
-    const lat = body.location?.lat ?? 40.7128;
-    const lng = body.location?.lng ?? -74.0060;
     const withinKm = profile.maxDistanceKm || 25;
     const query: string | undefined = body.query;
-    
     const city = body.location?.city || profile.city || '';
+
+    // Resolve a location anchor WITHOUT defaulting to New York. Prefer real device coords;
+    // else map the city name to known coordinates; else leave unanchored (we then skip
+    // distance filtering and rely on the city-based Google Events search).
+    let lat: number | undefined = typeof body.location?.lat === 'number' ? body.location.lat : undefined;
+    let lng: number | undefined = typeof body.location?.lng === 'number' ? body.location.lng : undefined;
+    if ((lat == null || lng == null) && city) {
+      const c = CITY_COORDS[city.trim().toLowerCase()];
+      if (c) { lat = c[0]; lng = c[1]; }
+    }
+    const hasAnchor = lat != null && lng != null;
 
     // INTEREST-DRIVEN SEARCH — instead of one generic "nearby" sweep, query every source
     // ONCE PER INTEREST (run club, trivia, techno, drag, thrift pop-up, pick-up soccer, …)
@@ -321,12 +350,16 @@ export default async function handler(req: any, res: any) {
       ? [query]
       : uniqKw([undefined, 'watch party', ...interests, ...EVENT_TYPE_SEEDS]).slice(0, 14);
 
+    // Ticketmaster / SeatGeek / Eventbrite need coordinates, so only query them when we have
+    // an anchor. Google Events works off the city string, so it always runs.
     const [cheapBatches, gevResults] = await Promise.all([
-      Promise.all(cheapKeywords.map(kw => Promise.all([
-        fromEventbrite(lat, lng, withinKm, kw),
-        fromTicketmaster(lat, lng, withinKm, kw),
-        fromSeatGeek(lat, lng, withinKm, kw),
-      ]))),
+      hasAnchor
+        ? Promise.all(cheapKeywords.map(kw => Promise.all([
+            fromEventbrite(lat!, lng!, withinKm, kw),
+            fromTicketmaster(lat!, lng!, withinKm, kw),
+            fromSeatGeek(lat!, lng!, withinKm, kw),
+          ])))
+        : Promise.resolve([] as EventItem[][][]),
       Promise.all(gevKeywords.map(kw => fromGoogleEvents(city, kw))),
     ]);
     const eb = dedup(cheapBatches.flatMap(b => b[0]));
@@ -345,15 +378,16 @@ export default async function handler(req: any, res: any) {
       return true;
     }).map(e => ({ ...e, image: bestImage(e) }));  // crisp type-based images, no blurry thumbs
     
-    // Drop events outside the user's selected radius (miles), when we have coordinates.
+    // Drop events outside the user's selected radius (miles) — only when we have an anchor.
+    // Without coordinates we keep everything (city-based results are already local).
     const R = 3959; const rad = (x: number) => x * Math.PI / 180;
-    const inRange = merged.filter((e: any) => {
+    const inRange = hasAnchor ? merged.filter((e: any) => {
       if (e.lat == null || e.lng == null) return true;
-      const dLat = rad(e.lat - lat), dLng = rad(e.lng - lng);
-      const a = Math.sin(dLat/2)**2 + Math.cos(rad(lat)) * Math.cos(rad(e.lat)) * Math.sin(dLng/2)**2;
+      const dLat = rad(e.lat - lat!), dLng = rad(e.lng - lng!);
+      const a = Math.sin(dLat/2)**2 + Math.cos(rad(lat!)) * Math.cos(rad(e.lat)) * Math.sin(dLng/2)**2;
       const dist = R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
       return dist <= withinKm * 1.15;
-    });
+    }) : merged;
     // Always prioritize events happening on the day the app is opened.
     const today = new Date().toDateString();
     const todays = inRange.filter((e: any) => { const v = e.startsAt; const t = Date.parse(v || ''); return isNaN(t) ? false : new Date(v).toDateString() === today; });
@@ -371,11 +405,12 @@ export default async function handler(req: any, res: any) {
       });
     } catch {}
     const featuredIds = new Set(featured.map(e => e.id));
-    const finalEvents = [...featured, ...ranked.filter(e => !featuredIds.has(e.id))].slice(0, 60);
+    const finalEvents = [...featured, ...ranked.filter(e => !featuredIds.has(e.id))].slice(0, 120);
 
     res.status(200).json({
       events: finalEvents,
       summary,
+      anchor: hasAnchor ? { lat, lng, city: city || undefined } : { city: city || undefined },
       sources: { eventbrite: eb.length, ticketmaster: tm.length, seatgeek: sg.length, googleEvents: gev.length, website: web.length, featured: featured.length },
     });
   } catch (err: any) {
