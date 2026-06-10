@@ -47,7 +47,7 @@ async function fromEventbrite(lat: number, lng: number, withinKm: number, kw?: s
   const url = `https://www.eventbriteapi.com/v3/events/search/?location.latitude=${lat}&location.longitude=${lng}&location.within=${Math.round(withinKm * 1.609)}km${kw ? '&q=' + encodeURIComponent(kw) : ''}&expand=venue,ticket_availability&token=${token}`;
   const data = await safeFetch(url);
   if (!data?.events) return [];
-  return data.events.slice(0, 30).map((e: any): EventItem => ({
+  return data.events.slice(0, 60).map((e: any): EventItem => ({
     id: 'eb_' + e.id,
     source: 'eventbrite',
     title: e.name?.text || 'Event',
@@ -67,7 +67,7 @@ async function fromEventbrite(lat: number, lng: number, withinKm: number, kw?: s
 async function fromTicketmaster(lat: number, lng: number, withinKm: number, kw?: string): Promise<EventItem[]> {
   const key = process.env.TICKETMASTER_KEY;
   if (!key) return [];
-  const url = `https://app.ticketmaster.com/discovery/v2/events.json?latlong=${lat},${lng}&radius=${Math.round(withinKm)}&unit=miles&size=40${kw ? '&keyword=' + encodeURIComponent(kw) : ''}&apikey=${key}`;
+  const url = `https://app.ticketmaster.com/discovery/v2/events.json?latlong=${lat},${lng}&radius=${Math.round(withinKm)}&unit=miles&size=100${kw ? '&keyword=' + encodeURIComponent(kw) : ''}&apikey=${key}`;
   const data = await safeFetch(url);
   const events = data?._embedded?.events || [];
   return events.map((e: any): EventItem => ({
@@ -90,7 +90,7 @@ async function fromTicketmaster(lat: number, lng: number, withinKm: number, kw?:
 async function fromSeatGeek(lat: number, lng: number, withinKm: number, kw?: string): Promise<EventItem[]> {
   const id = process.env.SEATGEEK_CLIENT_ID;
   if (!id) return [];
-  const url = `https://api.seatgeek.com/2/events?lat=${lat}&lon=${lng}&range=${Math.round(withinKm)}mi&per_page=40${kw ? '&q=' + encodeURIComponent(kw) : ''}&client_id=${id}`;
+  const url = `https://api.seatgeek.com/2/events?lat=${lat}&lon=${lng}&range=${Math.round(withinKm)}mi&per_page=100${kw ? '&q=' + encodeURIComponent(kw) : ''}&client_id=${id}`;
   const data = await safeFetch(url);
   const events = data?.events || [];
   return events.map((e: any): EventItem => ({
@@ -153,7 +153,7 @@ async function fromGoogleEvents(city: string, query?: string): Promise<EventItem
   const url = `https://serpapi.com/search.json?engine=google_events&q=${encodeURIComponent(q)}&hl=en&gl=us&api_key=${key}`;
   const data = await safeFetch(url);
   const list = data?.events_results || [];
-  return list.slice(0, 40).map((e: any): EventItem => ({
+  return list.slice(0, 60).map((e: any): EventItem => ({
     id: 'gev_' + hashStr((e.title || '') + (e.date?.start_date || e.date?.when || '')),
     source: 'google_events',
     title: e.title,
@@ -186,19 +186,20 @@ const TYPE_IMAGES: { re: RegExp; url: string }[] = [
 ];
 const DEFAULT_IMG = IMG('photo-1492684223066-81342ee5ff30');
 function bestImage(e: EventItem): string {
-  const has = !!(e.image && /^https?:\/\//.test(e.image));
-  const lowRes = e.source === 'google_events' || e.source === 'social';
-  if (has && !lowRes) return e.image as string;          // trust real high-res sources
+  // ALWAYS use a clean type-based placeholder. Event-supplied photos came back blurry and
+  // inconsistent, so every card is standardized on a sharp stock image matching its type.
   const hay = ((e.categories || []).join(' ') + ' ' + (e.title || '')).toLowerCase();
   for (const t of TYPE_IMAGES) if (t.re.test(hay)) return t.url;
-  return has ? (e.image as string) : DEFAULT_IMG;        // keep original over nothing
+  return DEFAULT_IMG;
 }
 
 async function curateWithClaude(profile: Profile, events: EventItem[], query?: string): Promise<{ ranked: EventItem[]; summary: string }> {
   const key = process.env.ANTHROPIC_API_KEY;
   if (!key || events.length === 0) return { ranked: events, summary: '' };
   
-  const compact = events.map(e => ({
+  // Rank up to 200 events with the AI (keeps cost/context sane); any beyond that still
+  // get returned, just unranked at the end, so we never hide matching events.
+  const compact = events.slice(0, 200).map(e => ({
     id: e.id, title: e.title, venue: e.venue, city: e.city,
     startsAt: e.startsAt, categories: e.categories,
     price: e.price, description: e.description?.slice(0, 200),
@@ -229,7 +230,7 @@ USER QUERY: ${query || '(none)'}
 EVENTS: ${JSON.stringify(compact)}
 
 Reply ONLY with JSON: { "summary": "1-2 sentence vibe summary", "ranked": [{ "id": "...", "score": 0-100, "why": "personal note tied to their interest/demographic, 1 sentence" }, ...] }
-Top 25 only, best first. Score = interest match + demographic fit + variety + time fit + price fit. Exclude non-events.`;
+Return AS MANY matching events as there are — do not cap the list. Rank best first. Score = interest match + demographic fit + variety + time fit + price fit. Exclude only true non-events (bare venue listings).`;
 
   try {
     const r = await fetch('https://api.anthropic.com/v1/messages', {
@@ -241,7 +242,7 @@ Top 25 only, best first. Score = interest match + demographic fit + variety + ti
       },
       body: JSON.stringify({
         model: 'claude-3-5-sonnet-20241022',
-        max_tokens: 2000,
+        max_tokens: 8000,
         messages: [{ role: 'user', content: prompt }],
       }),
     });
@@ -309,11 +310,6 @@ export default async function handler(req: any, res: any) {
       for (const k of arr) { const key = (k ?? '__all__').toLowerCase(); if (!s.has(key)) { s.add(key); out.push(k); } }
       return out;
     };
-    // Rotate through the seed list across the day so all types get covered over time.
-    const off = new Date().getHours();
-    const pick = (arr: string[], n: number) =>
-      arr.length ? Array.from({ length: Math.min(n, arr.length) }, (_, i) => arr[(off + i) % arr.length]) : [];
-
     // Cheap, high-quota sources (Ticketmaster / SeatGeek / Eventbrite): fan out widely.
     const cheapKeywords = query ? [query] : uniqKw([undefined, ...interests, ...EVENT_TYPE_SEEDS]);
 
@@ -323,7 +319,7 @@ export default async function handler(req: any, res: any) {
     // draining the quota in a single request.
     const gevKeywords = query
       ? [query]
-      : uniqKw([undefined, 'watch party', ...interests.slice(0, 2), ...pick(EVENT_TYPE_SEEDS, 3)]);
+      : uniqKw([undefined, 'watch party', ...interests, ...EVENT_TYPE_SEEDS]).slice(0, 14);
 
     const [cheapBatches, gevResults] = await Promise.all([
       Promise.all(cheapKeywords.map(kw => Promise.all([
