@@ -1,5 +1,5 @@
-import React, { useEffect, useMemo, useState } from 'react';
-import { SafeAreaView, View, Text, TextInput, TouchableOpacity, ScrollView, FlatList, Image, ActivityIndicator, StyleSheet, Modal, Platform, KeyboardAvoidingView, Switch, Linking, Share } from 'react-native';
+import React, { useEffect, useMemo, useState, useRef } from 'react';
+import { SafeAreaView, View, Text, TextInput, TouchableOpacity, ScrollView, FlatList, Image, ActivityIndicator, StyleSheet, Modal, Platform, KeyboardAvoidingView, Switch, Linking, Share, Animated, PanResponder, Dimensions, Alert } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as Location from 'expo-location';
 import { StatusBar } from 'expo-status-bar';
@@ -18,6 +18,50 @@ const PASSED_KEY = '@5to9_passed_v1';
 const FRIENDS_KEY = '@5to9_friends_v1';
 const IMPORTED_KEY = '@5to9_imported_v1';
 const USER_KEY = '@5to9_user_v1';
+const SAVED_EVS_KEY = '@5to9_saved_evs_v1';   // FULL saved event objects — Saved screen + taste learning
+const PASSED_EVS_KEY = '@5to9_passed_evs_v1'; // light records of passed events — taste learning
+
+// ---- Taste learning + persistent saves -------------------------------------------------
+// We keep full saved-event objects (so Saved works offline and never "loses" events when the
+// daily feed rotates) and light records of passes. Recent titles from both are sent to the
+// backend ranker so recommendations sharpen with use.
+const tasteLabel = (e: any) =>
+  (e?.title || '') + (Array.isArray(e?.categories) && e.categories.length ? ' (' + e.categories.slice(0, 2).join(', ') + ')' : '');
+
+async function getSavedEvents(): Promise<EventItem[]> {
+  try { const raw = await AsyncStorage.getItem(SAVED_EVS_KEY); return raw ? JSON.parse(raw) : []; } catch { return []; }
+}
+async function addSavedEvent(ev: EventItem){
+  try {
+    const arr = await getSavedEvents();
+    const next = [...arr.filter(e => e.id !== ev.id), ev].slice(-200);
+    await AsyncStorage.setItem(SAVED_EVS_KEY, JSON.stringify(next));
+  } catch {}
+}
+async function removeSavedEvent(id: string){
+  try {
+    const arr = await getSavedEvents();
+    await AsyncStorage.setItem(SAVED_EVS_KEY, JSON.stringify(arr.filter(e => e.id !== id)));
+  } catch {}
+}
+async function recordPassed(ev: EventItem){
+  try {
+    const raw = await AsyncStorage.getItem(PASSED_EVS_KEY);
+    const arr: any[] = raw ? JSON.parse(raw) : [];
+    const next = [...arr.filter(x => x.id !== ev.id), { id: ev.id, title: ev.title || '', categories: ev.categories, at: Date.now() }].slice(-150);
+    await AsyncStorage.setItem(PASSED_EVS_KEY, JSON.stringify(next));
+  } catch {}
+}
+async function getTaste(): Promise<{ liked: string[]; passed: string[] }> {
+  try {
+    const [likedArr, praw] = await Promise.all([getSavedEvents(), AsyncStorage.getItem(PASSED_EVS_KEY)]);
+    const passedArr: any[] = praw ? JSON.parse(praw) : [];
+    return {
+      liked: likedArr.slice(-40).map(tasteLabel).filter(Boolean),
+      passed: passedArr.slice(-40).map(tasteLabel).filter(Boolean),
+    };
+  } catch { return { liked: [], passed: [] }; }
+}
 
 // Login-free identity: a stable device userId + a shareable invite code (registered on the backend).
 async function ensureIdentity(profile?: any){
@@ -145,10 +189,11 @@ function useResolvedLocation(profile: Profile): Loc | null {
 
 async function fetchEvents(profile: Profile, location: Loc, query?: string){
   try {
+    const taste = await getTaste();
     const r = await fetch(API_BASE + '/api/townie', {
       method:'POST',
       headers:{'content-type':'application/json'},
-      body: JSON.stringify({ profile, location, query }),
+      body: JSON.stringify({ profile, location, query, taste }),
     });
     if (!r.ok) return { events: [], summary: '' };
     return await r.json();
@@ -324,27 +369,52 @@ function EventCard({ ev, onOpen, onSave, rank, saved }: any){
   );
 }
 
-function EventDetail({ ev, visible, onClose, onSave }: any){
+function EventDetail({ ev, visible, onClose, onSave, onLike, onPass }: any){
   if (!ev) return null;
+  const when = fmtDate(ev.startsAt);
+  const end = ev.endsAt ? fmtTime(ev.endsAt) : '';
   return (
     <Modal visible={visible} animationType="slide" transparent={false} onRequestClose={onClose}>
       <SafeAreaView style={{flex:1, backgroundColor: BG}}>
         <ScrollView>
           {ev.image ? <Image source={{uri: ev.image}} style={{width:'100%', height:280}}/> : null}
           <View style={{padding:18}}>
+            <View style={[s.wrap, {marginBottom:10}]}>
+              {(ev.categories || []).slice(0,3).map((c: string, i: number) => (
+                <View key={i} style={s.catChip}><Text style={s.catChipTxt}>{c}</Text></View>
+              ))}
+              {ev._score != null && ev._score > 0 ? <View style={s.matchChip}><Text style={s.matchChipTxt}>{Math.round(ev._score)}% match</Text></View> : null}
+            </View>
             <Text style={s.detailTitle}>{ev.title}</Text>
-            <Text style={s.detailMeta}>{[ev.venue, ev.city].filter(Boolean).join(' \u00b7 ')}</Text>
-            <Text style={s.detailMeta}>{fmtDate(ev.startsAt)}</Text>
-            {ev.price && <Text style={s.detailMeta}>{fmtPrice(ev.price)}</Text>}
-            {(ev as any)._note ? <Text style={s.detailNote}>{(ev as any)._note}</Text> : null}
-            {ev.description ? <Text style={s.detailDesc}>{ev.description}</Text> : null}
+            <View style={{marginTop:12}}>
+              <View style={s.detailRow}><Text style={s.detailIcon}>\ud83d\udccd</Text><Text style={s.detailMetaBig}>{[ev.venue, ev.city].filter(Boolean).join(' \u00b7 ') || 'Venue TBA'}</Text></View>
+              <View style={s.detailRow}><Text style={s.detailIcon}>\ud83d\uddd3</Text><Text style={s.detailMetaBig}>{when}{end ? ' \u2013 ' + end : ''}</Text></View>
+              <View style={s.detailRow}><Text style={s.detailIcon}>\ud83d\udcb5</Text><Text style={s.detailMetaBig}>{fmtPrice(ev.price) || 'See tickets for pricing'}</Text></View>
+              {ev.source ? <View style={s.detailRow}><Text style={s.detailIcon}>\ud83d\udd0e</Text><Text style={s.detailMetaBig}>via {String(ev.source).replace('_',' ')}</Text></View> : null}
+            </View>
+            {ev._note ? (<>
+              <Text style={s.detailSection}>Why this pick</Text>
+              <Text style={s.detailNote}>{ev._note}</Text>
+            </>) : null}
+            {ev.description ? (<>
+              <Text style={s.detailSection}>About this event</Text>
+              <Text style={s.detailDesc}>{ev.description}</Text>
+            </>) : null}
             {ev.url ? <TouchableOpacity onPress={()=>Linking.openURL(ev.url)} style={s.linkBtn}><Text style={s.linkBtnTxt}>Get tickets / more info</Text></TouchableOpacity> : null}
           </View>
         </ScrollView>
-        <View style={s.detailFooter}>
-          <GhostBtn label="Close" onPress={onClose}/>
-          <PrimaryBtn label="Save" onPress={onSave}/>
-        </View>
+        {(onLike || onPass) ? (
+          <View style={s.detailFooter}>
+            <TouchableOpacity onPress={onPass} style={[s.swipeBtn, s.swipeNo]}><Text style={s.swipeBtnIcon}>\ud83d\udc4e</Text></TouchableOpacity>
+            <GhostBtn label="Close" onPress={onClose}/>
+            <TouchableOpacity onPress={onLike} style={[s.swipeBtn, s.swipeYes]}><Text style={s.swipeBtnIcon}>\u2764\ufe0f</Text></TouchableOpacity>
+          </View>
+        ) : (
+          <View style={s.detailFooter}>
+            <GhostBtn label="Close" onPress={onClose}/>
+            <PrimaryBtn label="Save" onPress={onSave}/>
+          </View>
+        )}
       </SafeAreaView>
     </Modal>
   );
@@ -399,6 +469,34 @@ function Discover({ profile, onEditProfile, onShowSaved }: any){
   const [index, setIndex] = useState(0);
   const loc = useResolvedLocation(profile);
 
+  // --- Tinder-style swipe: drag right to save, left to pass ---
+  const SCREEN_W = Dimensions.get('window').width;
+  const pan = useRef(new Animated.ValueXY()).current;
+  const swipingRef = useRef(false); // block double-fires while a card animates off
+  const swipeHandlersRef = useRef({ like: () => {}, pass: () => {} });
+  function swipeOut(dir: 1 | -1){
+    if (swipingRef.current) return;
+    swipingRef.current = true;
+    Animated.timing(pan, { toValue: { x: dir * SCREEN_W * 1.3, y: 0 }, duration: 220, useNativeDriver: false }).start(() => {
+      pan.setValue({ x: 0, y: 0 });
+      swipingRef.current = false;
+      if (dir === 1) swipeHandlersRef.current.like(); else swipeHandlersRef.current.pass();
+    });
+  }
+  const panResponder = useRef(PanResponder.create({
+    onMoveShouldSetPanResponder: (_e, g) => Math.abs(g.dx) > 14 && Math.abs(g.dx) > Math.abs(g.dy) * 1.4,
+    onPanResponderMove: Animated.event([null, { dx: pan.x, dy: pan.y }], { useNativeDriver: false }),
+    onPanResponderRelease: (_e, g) => {
+      if (g.dx > 110 || g.vx > 1.2) swipeOut(1);
+      else if (g.dx < -110 || g.vx < -1.2) swipeOut(-1);
+      else Animated.spring(pan, { toValue: { x: 0, y: 0 }, friction: 6, useNativeDriver: false }).start();
+    },
+    onPanResponderTerminate: () => Animated.spring(pan, { toValue: { x: 0, y: 0 }, friction: 6, useNativeDriver: false }).start(),
+  })).current;
+  const cardRotate = pan.x.interpolate({ inputRange: [-SCREEN_W, 0, SCREEN_W], outputRange: ['-12deg', '0deg', '12deg'] });
+  const likeOpacity = pan.x.interpolate({ inputRange: [20, 120], outputRange: [0, 1], extrapolate: 'clamp' });
+  const nopeOpacity = pan.x.interpolate({ inputRange: [-120, -20], outputRange: [1, 0], extrapolate: 'clamp' });
+
   useEffect(() => { (async () => {
     const sv = await AsyncStorage.getItem(SAVED_KEY);
     if (sv) setSaved(JSON.parse(sv));
@@ -410,9 +508,12 @@ function Discover({ profile, onEditProfile, onShowSaved }: any){
     const r = await fetchEvents(profile, loc, q);
     const impRaw = await AsyncStorage.getItem(IMPORTED_KEY);
     const imp: EventItem[] = impRaw ? JSON.parse(impRaw) : [];
+    // Prune imported events whose date has passed so old link-imports don't pin the top of the feed forever.
+    const fresh = imp.filter(e => { const t = Date.parse(e.startsAt || ''); return isNaN(t) || t > Date.now() - 24 * 3600 * 1000; });
+    if (fresh.length !== imp.length) await AsyncStorage.setItem(IMPORTED_KEY, JSON.stringify(fresh));
     const paRaw = await AsyncStorage.getItem(PASSED_KEY);
     const pa: string[] = paRaw ? JSON.parse(paRaw) : [];
-    const list = [...imp, ...(r.events || [])].filter(e => !pa.includes(e.id));
+    const list = [...fresh, ...(r.events || [])].filter(e => !pa.includes(e.id));
     setEvents(list);
     setIndex(0);
     setSummary(r.summary || '');
@@ -434,14 +535,17 @@ function Discover({ profile, onEditProfile, onShowSaved }: any){
       const praw = await AsyncStorage.getItem(PASSED_KEY);
       const pa: string[] = praw ? JSON.parse(praw) : [];
       if (!pa.includes(cur.id)) { pa.push(cur.id); await AsyncStorage.setItem(PASSED_KEY, JSON.stringify(pa)); }
+      await recordPassed(cur); // taste learning signal
     }
     setIndex(i => i + 1);
   }
   async function like(){
     const cur = events[index];
-    if (cur && !saved.includes(cur.id)) await toggleSave(cur.id);
+    if (cur && !saved.includes(cur.id)) await toggleSave(cur);
     setIndex(i => i + 1);
   }
+  // Keep the swipe gesture wired to the freshest like/pass closures on every render.
+  swipeHandlersRef.current = { like, pass };
   async function handleImported(ev: EventItem){
     const impRaw = await AsyncStorage.getItem(IMPORTED_KEY);
     const imp: EventItem[] = impRaw ? JSON.parse(impRaw) : [];
@@ -451,11 +555,13 @@ function Discover({ profile, onEditProfile, onShowSaved }: any){
     setOpen(ev);
   }
   useEffect(() => { if (loc) load(); }, [loc?.lat, loc?.lng, loc?.city]);
-  
-  async function toggleSave(id: string){
-    const next = saved.includes(id) ? saved.filter(x => x !== id) : [...saved, id];
+
+  async function toggleSave(ev: EventItem){
+    const has = saved.includes(ev.id);
+    const next = has ? saved.filter(x => x !== ev.id) : [...saved, ev.id];
     setSaved(next);
     await AsyncStorage.setItem(SAVED_KEY, JSON.stringify(next));
+    if (has) await removeSavedEvent(ev.id); else await addSavedEvent(ev); // full object → Saved + taste
   }
   
   return (
@@ -480,32 +586,48 @@ function Discover({ profile, onEditProfile, onShowSaved }: any){
         <View style={s.center}><Text style={s.emptyTitle}>That's everything for now</Text><Text style={s.emptyTxt}>Check back later, widen your radius, or ask Townie.</Text><View style={{height:16}}/><PrimaryBtn label="Reload" onPress={()=>load()}/></View>
       ) : (
         <View style={{flex:1, paddingHorizontal:16, paddingTop:6}}>
-          {(() => { const cur:any = events[index]; return (
+          {(() => { const cur:any = events[index]; const nxt:any = events[index+1]; return (
           <>
-          <View style={s.swipeCard}>
-            {cur.image
-              ? <Image source={{uri: cur.image}} style={s.swipeImg}/>
-              : <View style={[s.swipeImg, s.cardImgFallback]}><Text style={s.cardImgFallbackTxt}>{(cur.title||'5to9')[0].toUpperCase()}</Text></View>}
-            <View style={s.swipeBody}>
-              <View style={[s.wrap, {marginBottom:8}]}>
-                {(cur.categories||[]).slice(0,2).map((c:string,i:number)=>(<View key={i} style={s.catChip}><Text style={s.catChipTxt}>{c}</Text></View>))}
-                {cur._score!=null ? <View style={s.matchChip}><Text style={s.matchChipTxt}>{Math.round(cur._score)}% match</Text></View> : null}
+          <View style={{flex:1, marginBottom:14}}>
+            {nxt ? (
+              <View style={[s.swipeCard, s.swipeCardUnder]} pointerEvents="none">
+                {nxt.image
+                  ? <Image source={{uri: nxt.image}} style={s.swipeImg}/>
+                  : <View style={[s.swipeImg, s.cardImgFallback]}><Text style={s.cardImgFallbackTxt}>{(nxt.title||'5to9')[0].toUpperCase()}</Text></View>}
+                <View style={s.swipeBody}><Text style={s.swipeTitle} numberOfLines={1}>{nxt.title}</Text></View>
               </View>
-              <Text style={s.swipeTitle} numberOfLines={2}>{cur.title}</Text>
-              <Text style={s.swipeMeta}>{[cur.venue||cur.city, fmtTime(cur.startsAt), fmtPrice(cur.price)].filter(Boolean).join('  ·  ')}</Text>
-              {cur._note || cur.description ? <Text style={s.swipeDesc} numberOfLines={2}>{cur._note || cur.description}</Text> : null}
-            </View>
+            ) : null}
+            <Animated.View
+              {...panResponder.panHandlers}
+              style={[s.swipeCard, {transform: [{ translateX: pan.x }, { translateY: Animated.multiply(pan.y, 0.25) }, { rotate: cardRotate }]}]}
+            >
+              {cur.image
+                ? <Image source={{uri: cur.image}} style={s.swipeImg}/>
+                : <View style={[s.swipeImg, s.cardImgFallback]}><Text style={s.cardImgFallbackTxt}>{(cur.title||'5to9')[0].toUpperCase()}</Text></View>}
+              <Animated.View style={[s.swipeStamp, s.stampLike, {opacity: likeOpacity}]}><Text style={s.stampLikeTxt}>SAVE</Text></Animated.View>
+              <Animated.View style={[s.swipeStamp, s.stampNope, {opacity: nopeOpacity}]}><Text style={s.stampNopeTxt}>PASS</Text></Animated.View>
+              <View style={s.swipeBody}>
+                <View style={[s.wrap, {marginBottom:8}]}>
+                  {(cur.categories||[]).slice(0,2).map((c:string,i:number)=>(<View key={i} style={s.catChip}><Text style={s.catChipTxt}>{c}</Text></View>))}
+                  {cur._score!=null && cur._score>0 ? <View style={s.matchChip}><Text style={s.matchChipTxt}>{Math.round(cur._score)}% match</Text></View> : null}
+                </View>
+                <Text style={s.swipeTitle} numberOfLines={2}>{cur.title}</Text>
+                <Text style={s.swipeMeta}>{[cur.venue||cur.city, fmtTime(cur.startsAt), fmtPrice(cur.price)].filter(Boolean).join('  ·  ')}</Text>
+                {cur._note || cur.description ? <Text style={s.swipeDesc} numberOfLines={2}>{cur._note || cur.description}</Text> : null}
+              </View>
+            </Animated.View>
           </View>
           <View style={s.swipeActions}>
-            <TouchableOpacity onPress={pass} style={[s.swipeBtn, s.swipeNo]}><Text style={s.swipeBtnIcon}>👎</Text></TouchableOpacity>
             <TouchableOpacity onPress={()=>setOpen(cur)} style={s.detailsBtn}><Text style={s.detailsBtnTxt}>More Details</Text></TouchableOpacity>
-            <TouchableOpacity onPress={like} style={[s.swipeBtn, s.swipeYes]}><Text style={s.swipeBtnIcon}>❤️</Text></TouchableOpacity>
           </View>
+          <Text style={s.swipeHint}>Swipe right to save · swipe left to pass</Text>
           </>
           ); })()}
         </View>
       )}
-      <EventDetail ev={open} visible={!!open} onClose={()=>setOpen(null)} onSave={()=>{ if(open){toggleSave(open.id); setOpen(null);}}}/>
+      <EventDetail ev={open} visible={!!open} onClose={()=>setOpen(null)}
+        onLike={()=>{ setOpen(null); like(); }}
+        onPass={()=>{ setOpen(null); pass(); }}/>
       <ImportLinkModal visible={importing} onClose={()=>setImporting(false)} onImported={handleImported}/>
     </View>
   );
@@ -515,19 +637,34 @@ function SavedList({ profile, onClose }: any){
   const [items, setItems] = useState<EventItem[]>([]);
   const [open, setOpen] = useState<EventItem | null>(null);
   useEffect(() => { (async () => {
+    // Saved events are stored as full objects, so they render instantly, work offline, and never
+    // disappear when the daily feed rotates. Legacy id-only saves fall back to a feed lookup once.
+    const evs = await getSavedEvents();
+    if (evs.length > 0) { setItems(evs.slice().reverse()); return; }
     const sv = await AsyncStorage.getItem(SAVED_KEY);
     const ids: string[] = sv ? JSON.parse(sv) : [];
     if (ids.length === 0) { setItems([]); return; }
     const r = await fetchEvents(profile, await resolveLocation(profile));
-    setItems((r.events || []).filter((e: EventItem) => ids.includes(e.id)));
+    const found = (r.events || []).filter((e: EventItem) => ids.includes(e.id));
+    setItems(found);
+    for (const e of found) await addSavedEvent(e); // migrate legacy saves to full objects
   })(); }, []);
+  async function unsave(ev: EventItem){
+    await removeSavedEvent(ev.id);
+    try {
+      const sv = await AsyncStorage.getItem(SAVED_KEY);
+      const ids: string[] = sv ? JSON.parse(sv) : [];
+      await AsyncStorage.setItem(SAVED_KEY, JSON.stringify(ids.filter(x => x !== ev.id)));
+    } catch {}
+    setItems(prev => prev.filter(x => x.id !== ev.id));
+  }
   return (
     <View style={{flex:1, backgroundColor: BG}}>
       <View style={s.topBar}><Text style={s.brandSm}>Saved</Text>{onClose ? <TouchableOpacity onPress={onClose} style={s.iconBtn}><Text style={s.actDetailsTxt}>Done</Text></TouchableOpacity> : null}</View>
       {items.length === 0 ? (
         <View style={s.center}><Text style={s.emptyTitle}>Nothing saved yet</Text><Text style={s.emptyTxt}>Tap Save on any event.</Text></View>
       ) : (
-        <FlatList data={items} keyExtractor={e=>e.id} renderItem={({item})=> <EventCard ev={item} onOpen={()=>setOpen(item)} onSave={()=>{}}/>} contentContainerStyle={{padding:14, paddingBottom:120}} ItemSeparatorComponent={()=> <View style={{height:14}}/>}/>
+        <FlatList data={items} keyExtractor={e=>e.id} renderItem={({item})=> <EventCard ev={item} saved onOpen={()=>setOpen(item)} onSave={()=>unsave(item)}/>} contentContainerStyle={{padding:14, paddingBottom:120}} ItemSeparatorComponent={()=> <View style={{height:14}}/>}/>
       )}
       <EventDetail ev={open} visible={!!open} onClose={()=>setOpen(null)} onSave={()=>setOpen(null)}/>
     </View>
@@ -563,10 +700,12 @@ function StandoutScreen({ profile, onEditProfile, onShowSaved }: any){
     setEvents(list);
     setLoading(false);
   })(); }, [loc?.lat, loc?.lng, loc?.city]);
-  async function toggleSave(id: string){
-    const next = saved.includes(id) ? saved.filter(x => x !== id) : [...saved, id];
+  async function toggleSave(ev: EventItem){
+    const has = saved.includes(ev.id);
+    const next = has ? saved.filter(x => x !== ev.id) : [...saved, ev.id];
     setSaved(next);
     await AsyncStorage.setItem(SAVED_KEY, JSON.stringify(next));
+    if (has) await removeSavedEvent(ev.id); else await addSavedEvent(ev);
   }
   return (
     <View style={{flex:1, backgroundColor: BG}}>
@@ -586,12 +725,12 @@ function StandoutScreen({ profile, onEditProfile, onShowSaved }: any){
         <FlatList
           data={events}
           keyExtractor={(e) => e.id}
-          renderItem={({item, index}) => <EventCard ev={item} rank={index + 1} saved={saved.includes(item.id)} onOpen={()=>setOpen(item)} onSave={()=>toggleSave(item.id)} />}
+          renderItem={({item, index}) => <EventCard ev={item} rank={index + 1} saved={saved.includes(item.id)} onOpen={()=>setOpen(item)} onSave={()=>toggleSave(item)} />}
           contentContainerStyle={{padding:14, paddingBottom:120}}
           ItemSeparatorComponent={()=> <View style={{height:14}}/>}
         />
       )}
-      <EventDetail ev={open} visible={!!open} onClose={()=>setOpen(null)} onSave={()=>{ if(open){toggleSave(open.id); setOpen(null);} }}/>
+      <EventDetail ev={open} visible={!!open} onClose={()=>setOpen(null)} onSave={()=>{ if(open){toggleSave(open); setOpen(null);} }}/>
     </View>
   );
 }
@@ -703,7 +842,14 @@ function VipScreen(){
     try { const r = await fetch(API_BASE + '/api/featured'); const d = await r.json(); setFeatured(d.events || []); } catch {}
   }
   async function connectInstagram(){
-    try { const r = await fetch(API_BASE + '/api/social?action=connect'); const d = await r.json(); if (d.url) Linking.openURL(d.url); } catch {}
+    try {
+      const r = await fetch(API_BASE + '/api/social?action=connect');
+      const d = await r.json();
+      if (d.url) { await Linking.openURL(d.url); return; }
+      Alert.alert('Instagram connect', d.error || 'Instagram connection isn’t available yet — check back soon.');
+    } catch {
+      Alert.alert('Instagram connect', 'Couldn’t reach the server. Check your connection and try again.');
+    }
   }
   useEffect(() => { loadFeatured(); }, []);
   return (
@@ -1021,7 +1167,19 @@ const s = StyleSheet.create({
   swipeBtnIcon: { fontSize:26 },
   detailsBtn: { flex:1, backgroundColor: CARD, borderWidth:1, borderColor: LINE, borderRadius:999, paddingVertical:16, alignItems:'center' },
   detailsBtnTxt: { color: FG, fontWeight:'700', fontSize:15 },
-  detailNote: { color: ACCENT, fontSize:14, fontStyle:'italic', marginTop:12, lineHeight:20 },
+  detailNote: { color: ACCENT, fontSize:14, fontStyle:'italic', marginTop:6, lineHeight:20 },
+  detailSection: { color: FG, fontSize:15, fontWeight:'800', marginTop:18, marginBottom:4 },
+  detailRow: { flexDirection:'row', alignItems:'flex-start', gap:8, marginTop:6 },
+  detailIcon: { fontSize:14, width:22 },
+  detailMetaBig: { color: FG, fontSize:15, flex:1, lineHeight:21 },
+  // --- swipe gesture chrome ---
+  swipeCardUnder: { position:'absolute', top:0, left:0, right:0, bottom:0, transform:[{scale:0.96}], opacity:0.55 },
+  swipeStamp: { position:'absolute', top:24, paddingHorizontal:14, paddingVertical:6, borderWidth:3, borderRadius:10, transform:[{rotate:'-14deg'}] },
+  stampLike: { left:18, borderColor:'#5dd15d' },
+  stampLikeTxt: { color:'#5dd15d', fontSize:28, fontWeight:'900', letterSpacing:2 },
+  stampNope: { right:18, borderColor:'#ff6b6b', transform:[{rotate:'14deg'}] },
+  stampNopeTxt: { color:'#ff6b6b', fontSize:28, fontWeight:'900', letterSpacing:2 },
+  swipeHint: { color: MUTED, fontSize:12, textAlign:'center', paddingBottom:10, marginTop:-14 },
   linkBtn: { marginTop:18, backgroundColor: ACCENT, borderRadius:12, paddingVertical:14, alignItems:'center' },
   linkBtnTxt: { color:'#000', fontWeight:'800', fontSize:15 },
 });

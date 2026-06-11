@@ -17,7 +17,7 @@
     "ios": {
       "supportsTablet": false,
       "bundleIdentifier": "com.nightlife.social.nightlifeapp",
-      "buildNumber": "10",
+      "buildNumber": "11",
       "infoPlist": {
         "ITSAppUsesNonExemptEncryption": false,
         "NSLocationWhenInUseUsageDescription": "5to9 uses your location to find events near you.",
