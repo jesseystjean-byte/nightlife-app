@@ -230,9 +230,11 @@ function dedupeAcrossSources(arr: EventItem[]): EventItem[] {
   return out;
 }
 
-async function curateWithClaude(profile: Profile, events: EventItem[], query?: string): Promise<{ ranked: EventItem[]; summary: string }> {
+type Taste = { liked?: string[]; passed?: string[] };
+
+async function curateWithClaude(profile: Profile, events: EventItem[], query?: string, taste?: Taste): Promise<{ ranked: EventItem[]; summary: string; ai: string }> {
   const key = process.env.ANTHROPIC_API_KEY;
-  if (!key || events.length === 0) return { ranked: events, summary: '' };
+  if (!key || events.length === 0) return { ranked: events, summary: '', ai: key ? 'no_events' : 'no_key' };
   
   // Rank up to 200 events with the AI (keeps cost/context sane); any beyond that still
   // get returned, just unranked at the end, so we never hide matching events.
@@ -267,45 +269,63 @@ HARD RULES:
   NOT pad the list with unrelated events. If nothing matches well, return few or none rather
   than filler. When USER QUERY is empty, use the profile to personalize as usual.
 
+- TASTE LEARNING: if a TASTE PROFILE is provided below, it is LEARNED BEHAVIOR (what this user
+  actually saved vs. passed on) and outweighs their static interest tags when the two conflict.
+  Boost events similar in type/genre/vibe to ones they SAVED; score events similar to ones they
+  PASSED on lower (unless they match an explicit USER QUERY). Never exclude an event solely for
+  resembling a passed one — just rank it below fresher matches.
+
 USER PROFILE: ${JSON.stringify(profile)}
+TASTE PROFILE: ${taste && ((taste.liked?.length || 0) + (taste.passed?.length || 0)) > 0
+  ? JSON.stringify({ saved: (taste.liked || []).slice(-40), passed: (taste.passed || []).slice(-40) })
+  : '(none yet)'}
 USER QUERY: ${query || '(none)'}
 EVENTS: ${JSON.stringify(compact)}
 
 Reply ONLY with JSON: { "summary": "1-2 sentence vibe summary", "ranked": [{ "id": "...", "score": 0-100, "why": "personal note tied to their interest/demographic, 1 sentence" }, ...] }
 Return AS MANY matching events as there are — do not cap the list. Rank best first. Score = interest match + demographic fit + variety + time fit + price fit. Exclude only true non-events (bare venue listings).`;
 
-  try {
-    const r = await fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      headers: {
-        'content-type': 'application/json',
-        'x-api-key': key,
-        'anthropic-version': '2023-06-01',
-      },
-      body: JSON.stringify({
-        model: 'claude-3-5-sonnet-20241022',
-        max_tokens: 8000,
-        messages: [{ role: 'user', content: prompt }],
-      }),
-    });
-    if (!r.ok) return { ranked: events, summary: '' };
-    const data = await r.json();
-    const text = data?.content?.[0]?.text || '';
-    const jsonStart = text.indexOf('{');
-    const jsonEnd = text.lastIndexOf('}');
-    if (jsonStart < 0 || jsonEnd < 0) return { ranked: events, summary: '' };
-    const parsed = JSON.parse(text.slice(jsonStart, jsonEnd + 1));
-    const scoreById: Record<string, { score: number; why: string }> = {};
-    for (const r of (parsed.ranked || [])) {
-      scoreById[r.id] = { score: r.score, why: r.why };
+  // Current models with a fallback chain — the old hardcoded claude-3-5-sonnet-20241022 was
+  // retired, which made every ranking call fail SILENTLY (unranked feed, no notes, no summary).
+  // We now try current models in order and surface the AI status in the response so a ranking
+  // outage is visible in `sources.ai` instead of invisible.
+  const MODELS = ['claude-haiku-4-5-20251001', 'claude-sonnet-4-6'];
+  let lastErr = 'unknown';
+  for (const model of MODELS) {
+    try {
+      const r = await fetch('https://api.anthropic.com/v1/messages', {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          'x-api-key': key,
+          'anthropic-version': '2023-06-01',
+        },
+        body: JSON.stringify({
+          model,
+          max_tokens: 8000,
+          messages: [{ role: 'user', content: prompt }],
+        }),
+      });
+      if (!r.ok) { lastErr = model + ':http_' + r.status; continue; }
+      const data = await r.json();
+      const text = data?.content?.[0]?.text || '';
+      const jsonStart = text.indexOf('{');
+      const jsonEnd = text.lastIndexOf('}');
+      if (jsonStart < 0 || jsonEnd < 0) { lastErr = model + ':bad_json'; continue; }
+      const parsed = JSON.parse(text.slice(jsonStart, jsonEnd + 1));
+      const scoreById: Record<string, { score: number; why: string }> = {};
+      for (const rk of (parsed.ranked || [])) {
+        scoreById[rk.id] = { score: rk.score, why: rk.why };
+      }
+      const ranked = events
+        .map(e => ({ ...e, _score: scoreById[e.id]?.score ?? 0, _note: scoreById[e.id]?.why || '' }))
+        .sort((a, b) => (b as any)._score - (a as any)._score);
+      return { ranked, summary: parsed.summary || '', ai: 'ok:' + model };
+    } catch (e: any) {
+      lastErr = model + ':' + (e?.message || 'error').slice(0, 60);
     }
-    const ranked = events
-      .map(e => ({ ...e, _score: scoreById[e.id]?.score ?? 0, _note: scoreById[e.id]?.why || '' }))
-      .sort((a, b) => (b as any)._score - (a as any)._score);
-    return { ranked, summary: parsed.summary || '' };
-  } catch {
-    return { ranked: events, summary: '' };
   }
+  return { ranked: events, summary: '', ai: 'failed:' + lastErr };
 }
 
 export default async function handler(req: any, res: any) {
@@ -320,6 +340,12 @@ export default async function handler(req: any, res: any) {
     const profile: Profile = body.profile || {};
     const withinKm = profile.maxDistanceKm || 25;
     const query: string | undefined = body.query;
+    // Taste learning: the app sends short lists of event titles the user saved vs. passed on,
+    // so the ranker personalizes from real behavior, not just onboarding tags.
+    const taste: Taste = {
+      liked: Array.isArray(body.taste?.liked) ? body.taste.liked.filter((x: any) => typeof x === 'string').slice(-40) : [],
+      passed: Array.isArray(body.taste?.passed) ? body.taste.passed.filter((x: any) => typeof x === 'string').slice(-40) : [],
+    };
     const city = body.location?.city || profile.city || '';
 
     // Resolve a location anchor WITHOUT defaulting to New York. Prefer real device coords;
@@ -405,22 +431,34 @@ export default async function handler(req: any, res: any) {
       if (!query) await kvSet(cacheKey, { at: Date.now(), events: merged, sources: sourceCounts }).catch(() => {});
     }
     
-    // Drop events outside the user's selected radius (miles) — only when we have an anchor.
-    // Without coordinates we keep everything (city-based results are already local).
+    // Drop events outside the user's selected radius (miles). THE OLD NYC LEAK: crawled
+    // web_events span all launch cities (Boston/NYC/Chicago/Seattle) and JSON-LD events carry
+    // no coordinates, so they skipped the distance filter and showed up in EVERY city's feed.
+    // Now: events WITH coords get the distance check; events WITHOUT coords must match the
+    // user's city by name (kept only if neither side has a city to compare).
+    const cityNorm = (city || '').trim().toLowerCase();
+    const sameCity = (ec?: string) => {
+      if (!cityNorm) return true;                    // no user city to compare against
+      const e = (ec || '').trim().toLowerCase();
+      if (!e) return true;                           // event has no city info — can't attribute
+      return e.includes(cityNorm) || cityNorm.includes(e);
+    };
     const R = 3959; const rad = (x: number) => x * Math.PI / 180;
-    const inRange = hasAnchor ? merged.filter((e: any) => {
-      if (e.lat == null || e.lng == null) return true;
-      const dLat = rad(e.lat - lat!), dLng = rad(e.lng - lng!);
-      const a = Math.sin(dLat/2)**2 + Math.cos(rad(lat!)) * Math.cos(rad(e.lat)) * Math.sin(dLng/2)**2;
-      const dist = R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-      return dist <= withinKm * 1.15;
-    }) : merged;
+    const inRange = merged.filter((e: any) => {
+      if (hasAnchor && e.lat != null && e.lng != null) {
+        const dLat = rad(e.lat - lat!), dLng = rad(e.lng - lng!);
+        const a = Math.sin(dLat/2)**2 + Math.cos(rad(lat!)) * Math.cos(rad(e.lat)) * Math.sin(dLng/2)**2;
+        const dist = R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+        return dist <= withinKm * 1.15;
+      }
+      return sameCity(e.city);
+    });
     // Always prioritize events happening on the day the app is opened.
     const today = new Date().toDateString();
     const todays = inRange.filter((e: any) => { const v = e.startsAt; const t = Date.parse(v || ''); return isNaN(t) ? false : new Date(v).toDateString() === today; });
     const pool = todays.length >= 6 ? todays : inRange;
 
-    const { ranked, summary } = await curateWithClaude(profile, pool, query);
+    const { ranked, summary, ai } = await curateWithClaude(profile, pool, query, taste);
 
     // Paid/featured events (vendors who paid via PayPal) ride at the top of the feed.
     let featured: EventItem[] = [];
@@ -438,7 +476,7 @@ export default async function handler(req: any, res: any) {
       events: finalEvents,
       summary,
       anchor: hasAnchor ? { lat, lng, city: city || undefined } : { city: city || undefined },
-      sources: { ...sourceCounts, featured: featured.length },
+      sources: { ...sourceCounts, featured: featured.length, ai },
     });
   } catch (err: any) {
     res.status(500).json({ error: err?.message || 'server error' });

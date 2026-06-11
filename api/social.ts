@@ -36,7 +36,7 @@ If no concrete event, isEvent=false. Infer the next future date if only a day/ti
     const r = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',
       headers: { 'content-type': 'application/json', 'x-api-key': key, 'anthropic-version': '2023-06-01' },
-      body: JSON.stringify({ model: 'claude-3-5-sonnet-20241022', max_tokens: 500, messages: [{ role: 'user', content: prompt }] }),
+      body: JSON.stringify({ model: 'claude-haiku-4-5-20251001', max_tokens: 500, messages: [{ role: 'user', content: prompt }] }),
     });
     if (!r.ok) return null;
     const d = await r.json();
@@ -89,6 +89,9 @@ export default async function handler(req: any, res: any){
 
   // Build the Instagram OAuth URL a venue taps to connect
   if (req.method === 'GET' && q.action === 'connect') {
+    // Without an Instagram App ID the OAuth URL is broken (client_id=) — tell the app clearly
+    // instead of sending users to an Instagram error page.
+    if (!IG_ID()) { res.status(200).json({ url: null, error: 'Instagram connection isn’t configured yet — add INSTAGRAM_APP_ID / INSTAGRAM_APP_SECRET in Vercel.' }); return; }
     const redirect = `https://${req.headers.host}/api/social`;
     const scope = 'instagram_business_basic';
     const url = `https://www.instagram.com/oauth/authorize?client_id=${IG_ID()}&redirect_uri=${encodeURIComponent(redirect)}&scope=${scope}&response_type=code`;
