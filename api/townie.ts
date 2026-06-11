@@ -12,7 +12,7 @@
 // POST body: { profile: {...}, location: { lat, lng, city }, query?: string }
 // Response: { events: [...], summary: string }
 
-import { kvGet } from './_store';
+import { kvGet, kvSet } from './_store';
 
 type Profile = {
   name?: string; birthYear?: number; gender?: string;
@@ -49,11 +49,15 @@ const CITY_COORDS: Record<string, [number, number]> = {
 };
 
 async function safeFetch(url: string, opts?: any): Promise<any> {
+  // Per-source timeout so one slow API can never hang the whole serverless request.
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 7000);
   try {
-    const r = await fetch(url, opts);
+    const r = await fetch(url, { ...(opts || {}), signal: ctrl.signal });
     if (!r.ok) return null;
     return await r.json();
   } catch { return null; }
+  finally { clearTimeout(timer); }
 }
 
 async function fromEventbrite(lat: number, lng: number, withinKm: number, kw?: string): Promise<EventItem[]> {
@@ -209,6 +213,23 @@ function bestImage(e: EventItem): string {
   return DEFAULT_IMG;
 }
 
+// Cross-source de-dup: the same event from Ticketmaster + SeatGeek + Google Events has slightly
+// different titles, so we key on a normalized title + the event day rather than exact strings.
+function normTitle(t?: string): string {
+  return (t || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').replace(/\b(the|a|an|live|presents|tour|concert)\b/g, ' ').replace(/\s+/g, ' ').trim();
+}
+function dedupeAcrossSources(arr: EventItem[]): EventItem[] {
+  const seen = new Set<string>(); const out: EventItem[] = [];
+  for (const e of arr) {
+    const nt = normTitle(e.title).slice(0, 36);
+    if (!nt) { out.push(e); continue; }                 // keep untitled rather than collapse
+    const key = nt + '|' + (e.startsAt || '').slice(0, 10);
+    if (seen.has(key)) continue;
+    seen.add(key); out.push(e);
+  }
+  return out;
+}
+
 async function curateWithClaude(profile: Profile, events: EventItem[], query?: string): Promise<{ ranked: EventItem[]; summary: string }> {
   const key = process.env.ANTHROPIC_API_KEY;
   if (!key || events.length === 0) return { ranked: events, summary: '' };
@@ -339,44 +360,50 @@ export default async function handler(req: any, res: any) {
       for (const k of arr) { const key = (k ?? '__all__').toLowerCase(); if (!s.has(key)) { s.add(key); out.push(k); } }
       return out;
     };
-    // Cheap, high-quota sources (Ticketmaster / SeatGeek / Eventbrite): fan out widely.
-    const cheapKeywords = query ? [query] : uniqKw([undefined, ...interests, ...EVENT_TYPE_SEEDS]);
+    // ---- POOL CACHE -----------------------------------------------------------------
+    // The expensive part (dozens of source calls + the metered SerpApi quota) is identical for
+    // everyone in the same city on the same day, so we cache the merged event POOL in Redis with
+    // a short TTL. Per-user ranking still runs fresh below. Specific text searches skip the cache.
+    const dayStamp = new Date().toISOString().slice(0, 10);
+    const citySlug = (city || '').toLowerCase().trim() || (hasAnchor ? `${lat!.toFixed(2)},${lng!.toFixed(2)}` : 'all');
+    const cacheKey = `pool:v2:${citySlug}:${dayStamp}`;
+    const POOL_TTL = 25 * 60 * 1000;
 
-    // Google Events runs on SerpApi (metered — free plan ~250 searches/mo, 1 per query).
-    // Keep this short but ALWAYS include "watch party" + the user's top interests, plus a
-    // rotating slice of the other niche types, so watch parties reliably appear without
-    // draining the quota in a single request.
-    const gevKeywords = query
-      ? [query]
-      : uniqKw([undefined, 'watch party', ...interests, ...EVENT_TYPE_SEEDS]).slice(0, 14);
+    let merged: EventItem[];
+    let sourceCounts: Record<string, any>;
+    const cachedPool = query ? null : await kvGet<{ at: number; events: EventItem[]; sources?: any }>(cacheKey).catch(() => null);
 
-    // Ticketmaster / SeatGeek / Eventbrite need coordinates, so only query them when we have
-    // an anchor. Google Events works off the city string, so it always runs.
-    const [cheapBatches, gevResults] = await Promise.all([
-      hasAnchor
-        ? Promise.all(cheapKeywords.map(kw => Promise.all([
-            fromEventbrite(lat!, lng!, withinKm, kw),
-            fromTicketmaster(lat!, lng!, withinKm, kw),
-            fromSeatGeek(lat!, lng!, withinKm, kw),
-          ])))
-        : Promise.resolve([] as EventItem[][][]),
-      Promise.all(gevKeywords.map(kw => fromGoogleEvents(city, kw))),
-    ]);
-    const eb = dedup(cheapBatches.flatMap(b => b[0]));
-    const tm = dedup(cheapBatches.flatMap(b => b[1]));
-    const sg = dedup(cheapBatches.flatMap(b => b[2]));
-    const gev = dedup(gevResults.flat());
-    const web = await kvGet<EventItem[]>('web_events').then(x => x || []).catch(() => []);
-
-    // EVENT FINDER — only real, dated events. (Google Places venue search removed:
-    // it returned bars/nightclubs, which made the app a location finder, not an event finder.)
-    const seen = new Set<string>();
-    const merged = [...gev, ...web, ...eb, ...tm, ...sg].filter(e => {
-      const k = (e.title || '') + '|' + (e.startsAt || '');
-      if (seen.has(k)) return false;
-      seen.add(k);
-      return true;
-    }).map(e => ({ ...e, image: bestImage(e) }));  // crisp type-based images, no blurry thumbs
+    if (cachedPool && Array.isArray(cachedPool.events) && Date.now() - cachedPool.at < POOL_TTL) {
+      merged = cachedPool.events;
+      sourceCounts = { ...(cachedPool.sources || {}), cached: true };
+    } else {
+      // Cheap, high-quota sources (Ticketmaster / SeatGeek / Eventbrite): fan out widely.
+      const cheapKeywords = query ? [query] : uniqKw([undefined, ...interests, ...EVENT_TYPE_SEEDS]);
+      // Google Events runs on SerpApi (metered). Keep short but ALWAYS include "watch party".
+      const gevKeywords = query
+        ? [query]
+        : uniqKw([undefined, 'watch party', ...interests, ...EVENT_TYPE_SEEDS]).slice(0, 14);
+      // TM/SG/EB need coordinates, so only query them when anchored. Google Events uses the city.
+      const [cheapBatches, gevResults] = await Promise.all([
+        hasAnchor
+          ? Promise.all(cheapKeywords.map(kw => Promise.all([
+              fromEventbrite(lat!, lng!, withinKm, kw),
+              fromTicketmaster(lat!, lng!, withinKm, kw),
+              fromSeatGeek(lat!, lng!, withinKm, kw),
+            ])))
+          : Promise.resolve([] as EventItem[][][]),
+        Promise.all(gevKeywords.map(kw => fromGoogleEvents(city, kw))),
+      ]);
+      const eb = dedup(cheapBatches.flatMap(b => b[0]));
+      const tm = dedup(cheapBatches.flatMap(b => b[1]));
+      const sg = dedup(cheapBatches.flatMap(b => b[2]));
+      const gev = dedup(gevResults.flat());
+      const web = await kvGet<EventItem[]>('web_events').then(x => x || []).catch(() => []);
+      // Real, dated events only; de-dup across sources by normalized title + day; crisp images.
+      merged = dedupeAcrossSources([...gev, ...web, ...eb, ...tm, ...sg]).map(e => ({ ...e, image: bestImage(e) }));
+      sourceCounts = { eventbrite: eb.length, ticketmaster: tm.length, seatgeek: sg.length, googleEvents: gev.length, website: web.length, cached: false };
+      if (!query) await kvSet(cacheKey, { at: Date.now(), events: merged, sources: sourceCounts }).catch(() => {});
+    }
     
     // Drop events outside the user's selected radius (miles) — only when we have an anchor.
     // Without coordinates we keep everything (city-based results are already local).
@@ -411,7 +438,7 @@ export default async function handler(req: any, res: any) {
       events: finalEvents,
       summary,
       anchor: hasAnchor ? { lat, lng, city: city || undefined } : { city: city || undefined },
-      sources: { eventbrite: eb.length, ticketmaster: tm.length, seatgeek: sg.length, googleEvents: gev.length, website: web.length, featured: featured.length },
+      sources: { ...sourceCounts, featured: featured.length },
     });
   } catch (err: any) {
     res.status(500).json({ error: err?.message || 'server error' });
