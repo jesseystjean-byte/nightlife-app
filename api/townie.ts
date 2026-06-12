@@ -424,7 +424,16 @@ export default async function handler(req: any, res: any) {
       const tm = dedup(cheapBatches.flatMap(b => b[1]));
       const sg = dedup(cheapBatches.flatMap(b => b[2]));
       const gev = dedup(gevResults.flat());
-      const web = await kvGet<EventItem[]>('web_events').then(x => x || []).catch(() => []);
+      let web = await kvGet<EventItem[]>('web_events').then(x => x || []).catch(() => []);
+      // On an explicit search, crawled events must actually mention a search term — otherwise
+      // unrelated academic/admin calendar entries flood the query results.
+      if (query) {
+        const terms = query.toLowerCase().split(/\s+/).filter(w => w.length > 2);
+        web = web.filter(e => {
+          const hay = ((e.title || '') + ' ' + (e.description || '') + ' ' + (e.categories || []).join(' ')).toLowerCase();
+          return terms.some(t => hay.includes(t));
+        });
+      }
       // Real, dated events only; de-dup across sources by normalized title + day; crisp images.
       merged = dedupeAcrossSources([...gev, ...web, ...eb, ...tm, ...sg]).map(e => ({ ...e, image: bestImage(e) }));
       sourceCounts = { eventbrite: eb.length, ticketmaster: tm.length, seatgeek: sg.length, googleEvents: gev.length, website: web.length, cached: false };
@@ -460,6 +469,17 @@ export default async function handler(req: any, res: any) {
 
     const { ranked, summary, ai } = await curateWithClaude(profile, pool, query, taste);
 
+    // Respect the AI's exclusions instead of padding the feed with its rejects (the old
+    // behavior sent 0%-match cards like university seminars for a "watch party" search).
+    // - Explicit search: return ONLY genuine matches — few or none beats filler.
+    // - Default feed: use the scored picks whenever there are enough of them.
+    let curated: EventItem[] = ranked;
+    if (ai.startsWith('ok')) {
+      const scored = (ranked as any[]).filter(e => (e._score ?? 0) > 0);
+      if (query) curated = scored;
+      else if (scored.length >= 8) curated = scored;
+    }
+
     // Paid/featured events (vendors who paid via PayPal) ride at the top of the feed.
     let featured: EventItem[] = [];
     try {
@@ -470,7 +490,7 @@ export default async function handler(req: any, res: any) {
       });
     } catch {}
     const featuredIds = new Set(featured.map(e => e.id));
-    const finalEvents = [...featured, ...ranked.filter(e => !featuredIds.has(e.id))].slice(0, 120);
+    const finalEvents = [...featured, ...curated.filter(e => !featuredIds.has(e.id))].slice(0, 120);
 
     res.status(200).json({
       events: finalEvents,

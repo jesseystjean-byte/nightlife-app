@@ -126,16 +126,24 @@ type EventItem = {
   categories?: string[]; description?: string;
 };
 
+// Events that only have a DATE (no time) arrive as midnight UTC — rendering those in local
+// time shows the WRONG DAY (e.g. "Jun 10, 5:00 PM" in Seattle for a Jun 11 event). Detect
+// date-only values and format them as a date in UTC, with no fabricated clock time.
+const isDateOnly = (iso: string) => /T00:00:00(\.000)?(Z|\+00:?00)$/.test(iso);
 function fmtDate(iso?: string){
   if (!iso) return '';
   try {
     const d = new Date(iso);
+    if (isDateOnly(iso)) return d.toLocaleDateString(undefined, { weekday:'short', month:'short', day:'numeric', timeZone:'UTC' });
     return d.toLocaleString(undefined, { weekday:'short', month:'short', day:'numeric', hour:'numeric', minute:'2-digit' });
   } catch { return iso; }
 }
 function fmtTime(iso?: string){
   if (!iso) return '';
-  try { return new Date(iso).toLocaleString(undefined, { hour:'numeric', minute:'2-digit' }).replace(/\s/g,'').toLowerCase(); } catch { return ''; }
+  try {
+    if (isDateOnly(iso)) return '';
+    return new Date(iso).toLocaleString(undefined, { hour:'numeric', minute:'2-digit' }).replace(/\s/g,'').toLowerCase();
+  } catch { return ''; }
 }
 function fmtPrice(p?: EventItem['price']){
   if (!p) return '';
@@ -463,6 +471,7 @@ function Discover({ profile, onEditProfile, onShowSaved }: any){
   const [summary, setSummary] = useState('');
   const [loading, setLoading] = useState(true);
   const [query, setQuery] = useState('');
+  const [activeQuery, setActiveQuery] = useState(''); // the search the current results belong to
   const [open, setOpen] = useState<EventItem | null>(null);
   const [saved, setSaved] = useState<string[]>([]);
   const [importing, setImporting] = useState(false);
@@ -513,9 +522,11 @@ function Discover({ profile, onEditProfile, onShowSaved }: any){
     if (fresh.length !== imp.length) await AsyncStorage.setItem(IMPORTED_KEY, JSON.stringify(fresh));
     const paRaw = await AsyncStorage.getItem(PASSED_KEY);
     const pa: string[] = paRaw ? JSON.parse(paRaw) : [];
-    const list = [...fresh, ...(r.events || [])].filter(e => !pa.includes(e.id));
+    // During an explicit search, imported events don't belong in the results.
+    const list = [...(q ? [] : fresh), ...(r.events || [])].filter(e => !pa.includes(e.id));
     setEvents(list);
     setIndex(0);
+    setActiveQuery(q || '');
     setSummary(r.summary || '');
     setLoading(false);
   }
@@ -583,7 +594,16 @@ function Discover({ profile, onEditProfile, onShowSaved }: any){
       {loading ? (
         <View style={s.center}><ActivityIndicator color={ACCENT}/><Text style={s.emptyTxt}>Curating your night\u2026</Text></View>
       ) : !events[index] ? (
-        <View style={s.center}><Text style={s.emptyTitle}>That's everything for now</Text><Text style={s.emptyTxt}>Check back later, widen your radius, or ask Townie.</Text><View style={{height:16}}/><PrimaryBtn label="Reload" onPress={()=>load()}/></View>
+        activeQuery ? (
+          <View style={s.center}>
+            <Text style={s.emptyTitle}>No matches for “{activeQuery}”</Text>
+            <Text style={s.emptyTxt}>Townie only shows genuine matches for a search — no filler. Try different words, or clear the search to see tonight's feed.</Text>
+            <View style={{height:16}}/>
+            <PrimaryBtn label="Clear search" onPress={()=>{ setQuery(''); load(); }}/>
+          </View>
+        ) : (
+          <View style={s.center}><Text style={s.emptyTitle}>That's everything for now</Text><Text style={s.emptyTxt}>Check back later, widen your radius, or ask Townie.</Text><View style={{height:16}}/><PrimaryBtn label="Reload" onPress={()=>load()}/></View>
+        )
       ) : (
         <View style={{flex:1, paddingHorizontal:16, paddingTop:6}}>
           {(() => { const cur:any = events[index]; const nxt:any = events[index+1]; return (
