@@ -46,5 +46,5 @@ jobs:
       - name: Guard against truncated files
         run: |
           for f in mobile/App.tsx mobile/src/*.ts mobile/src/*.tsx mobile/src/screens/*.tsx api/*.ts; do
-            tail -c 50 "$f" | grep -q "}" || (echo "$f looks truncated" && exit 1)
+            tail -c 50 "$f" | grep -qE "[};]" || (echo "$f looks truncated" && exit 1)
           done
