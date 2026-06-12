@@ -116,8 +116,16 @@ export default async function handler(req: any, res: any){
     } catch { res.status(400).send('Connection failed — please try again.'); return; }
   }
 
-  // Poll / cron refresh (Vercel cron hits this)
+  // Poll / cron refresh (Vercel cron hits this). Cron-only when CRON_SECRET is set —
+  // otherwise anyone could hammer it and burn the Anthropic quota on re-ingestion.
   if (req.method === 'POST' || q.action === 'refresh') {
+    const SECRET = process.env.CRON_SECRET || '';
+    if (SECRET) {
+      const auth = String(req.headers?.authorization || '');
+      if (auth !== `Bearer ${SECRET}` && String(q.secret || '') !== SECRET) {
+        res.status(401).json({ error: 'unauthorized' }); return;
+      }
+    }
     if (!kvEnabled()) { res.status(503).json({ error: 'Storage not configured.' }); return; }
     const n = await refreshAll();
     res.status(200).json({ ok: true, ingested: n }); return;

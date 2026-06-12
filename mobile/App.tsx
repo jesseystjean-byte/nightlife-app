@@ -12,6 +12,27 @@ const CARD = '#15151B';
 const ACCENT = '#D9FF3D';
 const LINE = '#222229';
 
+const APP_BUILD = '13';
+
+// Crash reporting: every uncaught JS error is sent to /api/log (capped Redis list) so
+// production breakage on real phones is visible instead of silent. The original handler
+// still runs, so dev behavior (red box) is unchanged.
+(() => {
+  const g: any = global as any;
+  if (!g.ErrorUtils || g.__5to9ErrHooked) return;
+  g.__5to9ErrHooked = true;
+  const prev = g.ErrorUtils.getGlobalHandler && g.ErrorUtils.getGlobalHandler();
+  g.ErrorUtils.setGlobalHandler((e: any, isFatal?: boolean) => {
+    try {
+      fetch(API_BASE + '/api/log', {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ message: String(e?.message || e), stack: String(e?.stack || '').slice(0, 2000), fatal: !!isFatal, build: APP_BUILD }),
+      }).catch(() => {});
+    } catch {}
+    if (prev) prev(e, isFatal);
+  });
+})();
+
 const PROFILE_KEY = '@5to9_profile_v1';
 const SAVED_KEY = '@5to9_saved_v1';
 const PASSED_KEY = '@5to9_passed_v1';
@@ -201,7 +222,9 @@ async function fetchEvents(profile: Profile, location: Loc, query?: string){
     const r = await fetch(API_BASE + '/api/townie', {
       method:'POST',
       headers:{'content-type':'application/json'},
-      body: JSON.stringify({ profile, location, query, taste }),
+      // tzOffsetMinutes lets the backend compute "today" in the USER'S timezone (evening
+      // sessions were previously treated as tomorrow once UTC rolled over).
+      body: JSON.stringify({ profile, location, query, taste, tzOffsetMinutes: new Date().getTimezoneOffset() }),
     });
     if (!r.ok) return { events: [], summary: '' };
     return await r.json();

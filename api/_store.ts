@@ -38,11 +38,52 @@ export async function kvGet<T = any>(key: string): Promise<T | null> {
   } catch { return null; }
 }
 
-export async function kvSet(key: string, value: any): Promise<boolean> {
+export async function kvSet(key: string, value: any, ttlSeconds?: number): Promise<boolean> {
   try {
     const c = await getClient();
     if (!c) return false;
-    await c.set(key, JSON.stringify(value));
+    if (ttlSeconds && ttlSeconds > 0) await c.set(key, JSON.stringify(value), { EX: Math.round(ttlSeconds) });
+    else await c.set(key, JSON.stringify(value));
     return true;
   } catch { return false; }
+}
+
+// Sliding-window-ish rate limiter: INCR a per-minute bucket with auto-expiry.
+// Returns true when the caller is WITHIN the limit. Fails open if Redis is absent
+// (the app keeps working; protection simply isn't active until storage exists).
+export async function rateLimitOk(bucketKey: string, maxPerMinute: number): Promise<boolean> {
+  try {
+    const c = await getClient();
+    if (!c) return true;
+    const key = `rl:${bucketKey}:${Math.floor(Date.now() / 60000)}`;
+    const n = await c.incr(key);
+    if (n === 1) await c.expire(key, 90);
+    return n <= maxPerMinute;
+  } catch { return true; }
+}
+
+// Capped list push for lightweight client error logs.
+export async function kvPushCapped(listKey: string, value: any, cap: number): Promise<boolean> {
+  try {
+    const c = await getClient();
+    if (!c) return false;
+    await c.lPush(listKey, JSON.stringify(value));
+    await c.lTrim(listKey, 0, Math.max(0, cap - 1));
+    return true;
+  } catch { return false; }
+}
+
+export async function kvRange(listKey: string, count: number): Promise<any[]> {
+  try {
+    const c = await getClient();
+    if (!c) return [];
+    const items = await c.lRange(listKey, 0, Math.max(0, count - 1));
+    return items.map((s: string) => { try { return JSON.parse(s); } catch { return s; } });
+  } catch { return []; }
+}
+
+// Client IP for rate-limit buckets (Vercel sets x-forwarded-for).
+export function clientIp(req: any): string {
+  const xf = String(req?.headers?.['x-forwarded-for'] || '');
+  return (xf.split(',')[0] || '').trim() || 'unknown';
 }

@@ -1,0 +1,40 @@
+name: Code check
+
+# Fast syntax/sanity gate on every push & PR. Catches broken or truncated files
+# BEFORE they reach Vercel or burn an EAS iOS build.
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Syntax-check API functions
+        run: |
+          for f in api/*.ts; do
+            echo "== $f"
+            npx -y esbuild --loader:.ts=ts "$f" --outfile=/dev/null
+          done
+
+      - name: Syntax-check app
+        run: npx -y esbuild --loader:.tsx=tsx mobile/App.tsx --outfile=/dev/null
+
+      - name: Validate JSON configs
+        run: |
+          node -e "JSON.parse(require('fs').readFileSync('mobile/app.json','utf8')); console.log('app.json ok')"
+          node -e "JSON.parse(require('fs').readFileSync('mobile/eas.json','utf8')); console.log('eas.json ok')"
+          node -e "JSON.parse(require('fs').readFileSync('vercel.json','utf8')); console.log('vercel.json ok')"
+
+      - name: Guard against truncated files
+        run: |
+          tail -c 200 mobile/App.tsx | grep -q "});" || (echo "App.tsx looks truncated" && exit 1)
+          for f in api/*.ts; do
+            tail -c 50 "$f" | grep -q "}" || (echo "$f looks truncated" && exit 1)
+          done

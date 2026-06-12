@@ -12,6 +12,8 @@
 // POST body: { url: string, location?: { city?: string } }
 // Response: { event: EventItem | null, raw?: {...} }
 
+import { rateLimitOk, clientIp } from './_store';
+
 type EventItem = {
   id: string; source: string; title: string;
   startsAt: string; endsAt?: string;
@@ -109,6 +111,7 @@ export default async function handler(req: any, res: any){
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
   if (req.method === 'OPTIONS') { res.status(200).end(); return; }
   if (req.method !== 'POST') { res.status(405).json({ error: 'POST only' }); return; }
+  if (!(await rateLimitOk('import:' + clientIp(req), 10))) { res.status(429).json({ error: 'Too many requests — try again in a minute.' }); return; }
   try {
     const body = typeof req.body === 'string' ? JSON.parse(req.body) : (req.body || {});
     const url: string = (body.url || '').trim();

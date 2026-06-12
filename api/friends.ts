@@ -12,7 +12,7 @@
 //
 // KV keys:  user:{userId} -> profile   |  code:{CODE} -> userId  |  friends:{userId} -> [userId]
 
-import { kvGet, kvSet, kvEnabled } from './_store';
+import { kvGet, kvSet, kvEnabled, rateLimitOk, clientIp } from './_store';
 import { cors } from './_paypal';
 
 type User = { userId: string; name?: string; city?: string; vibes?: string[]; code?: string; plan?: string; going?: boolean; updatedAt?: number };
@@ -33,6 +33,7 @@ export default async function handler(req: any, res: any){
   if (req.method === 'OPTIONS') { res.status(200).end(); return; }
   if (req.method !== 'POST') { res.status(405).json({ error: 'POST only' }); return; }
   if (!kvEnabled()) { res.status(503).json({ error: 'Storage not configured. Add a Vercel KV store to this project.' }); return; }
+  if (!(await rateLimitOk('friends:' + clientIp(req), 60))) { res.status(429).json({ error: 'Too many requests — try again in a minute.' }); return; }
 
   try {
     const body = typeof req.body === 'string' ? JSON.parse(req.body) : (req.body || {});

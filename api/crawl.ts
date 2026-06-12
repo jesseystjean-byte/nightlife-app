@@ -164,6 +164,17 @@ export default async function handler(req: any, res: any){
   if (req.method === 'OPTIONS') { res.status(200).end(); return; }
   if (!kvEnabled()) { res.status(503).json({ error: 'Storage not configured. Add a Vercel KV store.' }); return; }
 
+  // Admin/cron-only endpoint. When CRON_SECRET is set in Vercel, require it — Vercel's cron
+  // invocations send it automatically as "Authorization: Bearer <CRON_SECRET>". Without the
+  // guard, anyone could trigger crawls or edit the site list.
+  const SECRET = process.env.CRON_SECRET || '';
+  if (SECRET) {
+    const auth = String(req.headers?.authorization || '');
+    if (auth !== `Bearer ${SECRET}` && String(req.query?.secret || '') !== SECRET) {
+      res.status(401).json({ error: 'unauthorized' }); return;
+    }
+  }
+
   try {
     const runFlag = req.query?.run || (req.method === 'GET');
     const body = req.method === 'POST' ? (typeof req.body === 'string' ? JSON.parse(req.body) : (req.body || {})) : {};

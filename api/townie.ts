@@ -12,7 +12,7 @@
 // POST body: { profile: {...}, location: { lat, lng, city }, query?: string }
 // Response: { events: [...], summary: string }
 
-import { kvGet, kvSet } from './_store';
+import { kvGet, kvSet, rateLimitOk, clientIp } from './_store';
 
 type Profile = {
   name?: string; birthYear?: number; gender?: string;
@@ -334,7 +334,12 @@ export default async function handler(req: any, res: any) {
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
   if (req.method === 'OPTIONS') { res.status(200).end(); return; }
   if (req.method !== 'POST') { res.status(405).json({ error: 'POST only' }); return; }
-  
+
+  // Protect the metered upstream quotas (Anthropic / SerpApi) from abuse.
+  if (!(await rateLimitOk('townie:' + clientIp(req), 30))) {
+    res.status(429).json({ error: 'Too many requests — try again in a minute.' }); return;
+  }
+
   try {
     const body = typeof req.body === 'string' ? JSON.parse(req.body) : (req.body || {});
     const profile: Profile = body.profile || {};
@@ -437,7 +442,7 @@ export default async function handler(req: any, res: any) {
       // Real, dated events only; de-dup across sources by normalized title + day; crisp images.
       merged = dedupeAcrossSources([...gev, ...web, ...eb, ...tm, ...sg]).map(e => ({ ...e, image: bestImage(e) }));
       sourceCounts = { eventbrite: eb.length, ticketmaster: tm.length, seatgeek: sg.length, googleEvents: gev.length, website: web.length, cached: false };
-      if (!query) await kvSet(cacheKey, { at: Date.now(), events: merged, sources: sourceCounts }).catch(() => {});
+      if (!query) await kvSet(cacheKey, { at: Date.now(), events: merged, sources: sourceCounts }, 3600).catch(() => {});
     }
     
     // Drop events outside the user's selected radius (miles). THE OLD NYC LEAK: crawled
@@ -462,9 +467,20 @@ export default async function handler(req: any, res: any) {
       }
       return sameCity(e.city);
     });
-    // Always prioritize events happening on the day the app is opened.
-    const today = new Date().toDateString();
-    const todays = inRange.filter((e: any) => { const v = e.startsAt; const t = Date.parse(v || ''); return isNaN(t) ? false : new Date(v).toDateString() === today; });
+    // Always prioritize events happening on the day the app is opened — in the USER'S timezone.
+    // The old UTC comparison meant that from ~4-5pm Pacific onward, "today" had already rolled
+    // over to tomorrow, deprioritizing tonight's events for exactly the people opening the app
+    // to go out tonight. The app sends tzOffsetMinutes (JS getTimezoneOffset: minutes WEST of UTC).
+    const offMin = typeof body.tzOffsetMinutes === 'number' ? body.tzOffsetMinutes : 0;
+    const localDay = (ms: number) => new Date(ms - offMin * 60000).toISOString().slice(0, 10);
+    const todayStr = localDay(Date.now());
+    const dateOnly = (v: string) => /T00:00:00(\.000)?Z?$/.test(v) || /^\d{4}-\d{2}-\d{2}$/.test(v);
+    const todays = inRange.filter((e: any) => {
+      const v = e.startsAt || ''; const t = Date.parse(v);
+      if (isNaN(t)) return false;
+      // Date-only events (midnight UTC) name their calendar day directly — don't tz-shift them.
+      return (dateOnly(v) ? v.slice(0, 10) : localDay(t)) === todayStr;
+    });
     const pool = todays.length >= 6 ? todays : inRange;
 
     const { ranked, summary, ai } = await curateWithClaude(profile, pool, query, taste);

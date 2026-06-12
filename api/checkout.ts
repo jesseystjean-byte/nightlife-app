@@ -4,7 +4,7 @@
 // Response: { orderID, approveUrl } — the app opens approveUrl for the vendor to pay.
 
 import { PAYPAL_BASE, paypalToken, paypalConfigured, cors } from './_paypal';
-import { kvSet } from './_store';
+import { kvSet, rateLimitOk, clientIp } from './_store';
 
 const FEATURE_PRICE = 10; // USD per featured event
 
@@ -13,6 +13,7 @@ export default async function handler(req: any, res: any){
   if (req.method === 'OPTIONS') { res.status(200).end(); return; }
   if (req.method !== 'POST') { res.status(405).json({ error: 'POST only' }); return; }
   if (!paypalConfigured()) { res.status(503).json({ error: 'PayPal not configured. Set PAYPAL_CLIENT_ID / PAYPAL_SECRET in Vercel.' }); return; }
+  if (!(await rateLimitOk('checkout:' + clientIp(req), 10))) { res.status(429).json({ error: 'Too many requests — try again in a minute.' }); return; }
 
   try {
     const body = typeof req.body === 'string' ? JSON.parse(req.body) : (req.body || {});
@@ -38,8 +39,9 @@ export default async function handler(req: any, res: any){
     const data = await orderRes.json();
     if (!orderRes.ok || !data.id) { res.status(502).json({ error: 'PayPal order failed', detail: data }); return; }
 
-    // stash the pending event so capture.ts can publish it after payment
-    await kvSet(`order_${data.id}`, { event, status: 'CREATED', price });
+    // stash the pending event so capture.ts can publish it after payment (7-day TTL — stale
+    // unpaid orders should not live in Redis forever)
+    await kvSet(`order_${data.id}`, { event, status: 'CREATED', price }, 7 * 24 * 3600);
 
     const approveUrl = (data.links || []).find((l: any) => l.rel === 'approve')?.href || null;
     res.status(200).json({ orderID: data.id, approveUrl });
