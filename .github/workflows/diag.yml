@@ -1,0 +1,24 @@
+name: Diag EAS failure
+
+on:
+  push:
+    paths:
+      - '.github/workflows/diag.yml'
+
+permissions:
+  actions: read
+
+jobs:
+  diag:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Fetch failed run log and report
+        run: |
+          R="https://api.github.com/repos/${{ github.repository }}/actions"
+          H="Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}"
+          curl -s -H "$H" "$R/runs/27434741343/jobs" > jobs.json
+          JOBID=$(jq -r '.jobs[0].id' jobs.json)
+          curl -s -L -H "$H" "$R/jobs/$JOBID/logs" > log.txt || true
+          ERRS=$(grep -inE "error|fail|denied|limit|quota|invalid|expired|agreement" log.txt | grep -ivE "cache service|failed to restore|failed to save|ENOSPC" | tail -20 | head -c 1900 || true)
+          post() { curl -s -X POST https://project-ushrm.vercel.app/api/log -H 'content-type: application/json' --data-binary "$(jq -n --arg m "$1" --arg s "$2" '{message:$m, stack:$s, build:"diag2"}')"; }
+          post "DIAG2 error-lines" "$ERRS"
