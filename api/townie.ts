@@ -483,7 +483,19 @@ export default async function handler(req: any, res: any) {
     });
     const pool = todays.length >= 6 ? todays : inRange;
 
-    const { ranked, summary, ai } = await curateWithClaude(profile, pool, query, taste);
+    // PER-USER RANKING CACHE: the AI curation call is the most expensive step and its inputs
+    // (city pool + this user's profile/taste) rarely change within minutes. Cache the curated
+    // result for 10 min so repeat opens are instant and cost zero AI tokens. Searches skip it.
+    let ranked: EventItem[]; let summary: string; let ai: string; let rankCached = false;
+    const profSig = hashStr(JSON.stringify([profile, taste.liked, taste.passed]));
+    const rankKey = `rank:v1:${citySlug}:${dayStamp}:${profSig}`;
+    const rankHit = query ? null : await kvGet<{ ranked: EventItem[]; summary: string; ai: string }>(rankKey).catch(() => null);
+    if (rankHit && Array.isArray(rankHit.ranked) && rankHit.ranked.length > 0) {
+      ranked = rankHit.ranked; summary = rankHit.summary || ''; ai = rankHit.ai || 'ok:cache'; rankCached = true;
+    } else {
+      ({ ranked, summary, ai } = await curateWithClaude(profile, pool, query, taste));
+      if (!query && ai.startsWith('ok')) await kvSet(rankKey, { ranked, summary, ai }, 600).catch(() => {});
+    }
 
     // Respect the AI's exclusions instead of padding the feed with its rejects (the old
     // behavior sent 0%-match cards like university seminars for a "watch party" search).
@@ -512,7 +524,7 @@ export default async function handler(req: any, res: any) {
       events: finalEvents,
       summary,
       anchor: hasAnchor ? { lat, lng, city: city || undefined } : { city: city || undefined },
-      sources: { ...sourceCounts, featured: featured.length, ai },
+      sources: { ...sourceCounts, featured: featured.length, ai, rankCached },
     });
   } catch (err: any) {
     res.status(500).json({ error: err?.message || 'server error' });
