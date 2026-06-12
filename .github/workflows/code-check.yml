@@ -24,7 +24,18 @@ jobs:
           done
 
       - name: Syntax-check app
-        run: npx -y esbuild --loader:.tsx=tsx mobile/App.tsx --outfile=/dev/null
+        run: |
+          for f in mobile/App.tsx mobile/src/*.ts mobile/src/*.tsx mobile/src/screens/*.tsx; do
+            echo "== $f"
+            npx -y esbuild --loader:.ts=ts --loader:.tsx=tsx "$f" --outfile=/dev/null
+          done
+
+      - name: Check app import graph resolves
+        run: |
+          npx -y esbuild mobile/App.tsx --bundle --outfile=/dev/null \
+            --loader:.tsx=tsx --loader:.ts=ts \
+            --external:react --external:react-native --external:expo-location \
+            --external:expo-status-bar --external:@react-native-async-storage/async-storage
 
       - name: Validate JSON configs
         run: |
@@ -34,7 +45,6 @@ jobs:
 
       - name: Guard against truncated files
         run: |
-          tail -c 200 mobile/App.tsx | grep -q "});" || (echo "App.tsx looks truncated" && exit 1)
-          for f in api/*.ts; do
+          for f in mobile/App.tsx mobile/src/*.ts mobile/src/*.tsx mobile/src/screens/*.tsx api/*.ts; do
             tail -c 50 "$f" | grep -q "}" || (echo "$f looks truncated" && exit 1)
           done
