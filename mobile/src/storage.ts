@@ -54,23 +54,36 @@ export async function getTaste(): Promise<{ liked: string[]; passed: string[] }>
 }
 
 
-// Login-free identity: a stable device userId + a shareable invite code (registered on the backend).
-export async function ensureIdentity(profile?: any){
-  let stored: any = null;
-  try { const raw = await AsyncStorage.getItem(USER_KEY); stored = raw ? JSON.parse(raw) : null; } catch {}
-  let userId = stored?.userId;
-  if (!userId) {
-    userId = 'u_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
-    await AsyncStorage.setItem(USER_KEY, JSON.stringify({ userId }));
-  }
-  try {
-    const r = await fetch(API_BASE + '/api/friends', {
-      method: 'POST', headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ action: 'register', userId, name: profile?.name || '', city: profile?.city || '', vibes: profile?.vibes || [] }),
-    });
-    const d = await r.json();
-    if (d.user) { await AsyncStorage.setItem(USER_KEY, JSON.stringify({ userId, code: d.user.code })); return d.user; }
-  } catch {}
-  return { userId, code: stored?.code };
+// Login-free identity: a stable device userId + a per-device SECRET (the credential) +
+// a shareable invite code. The secret is generated once, stored only on this device, and
+// sent with every friends call — the backend binds its hash to the userId so nobody else
+// can act as this user.
+async function getStoredUser(): Promise<any> {
+  try { const raw = await AsyncStorage.getItem(USER_KEY); return raw ? JSON.parse(raw) : {}; } catch { return {}; }
 }
 
+export async function friendsApi(action: string, args: any = {}): Promise<any> {
+  const st = await getStoredUser();
+  const r = await fetch(API_BASE + '/api/friends', {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ action, userId: st.userId, secret: st.secret, ...args }),
+  });
+  return r.json();
+}
+
+export async function ensureIdentity(profile?: any){
+  const stored = await getStoredUser();
+  let userId = stored.userId;
+  let secret = stored.secret;
+  if (!userId) userId = 'u_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+  if (!secret) secret = 's_' + Math.random().toString(36).slice(2) + Math.random().toString(36).slice(2);
+  await AsyncStorage.setItem(USER_KEY, JSON.stringify({ ...stored, userId, secret }));
+  try {
+    const d = await friendsApi('register', { name: profile?.name || '', city: profile?.city || '', vibes: profile?.vibes || [] });
+    if (d.user) {
+      await AsyncStorage.setItem(USER_KEY, JSON.stringify({ userId, secret, code: d.user.code }));
+      return d.user;
+    }
+  } catch {}
+  return { userId, code: stored.code };
+}

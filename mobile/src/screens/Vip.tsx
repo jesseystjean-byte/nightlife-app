@@ -77,6 +77,24 @@ export function VendorListingModal({ visible, onClose, onPublished }: any){
   const [orderID, setOrderID] = useState('');
   const [err, setErr] = useState('');
   function set(k: string, v: string){ setF(prev => ({ ...prev, [k]: v })); }
+  // Auto-detect payment: once the PayPal webhook captures + publishes the event, flip to
+  // done automatically — the manual confirmation button stays as a fallback.
+  useEffect(() => {
+    if (phase !== 'approving' || !orderID) return;
+    const iv = setInterval(async () => {
+      try {
+        const r = await fetch(API_BASE + '/api/featured');
+        const d = await r.json();
+        if ((d.events || []).some((e: any) => e.id === 'vip_' + orderID)) {
+          clearInterval(iv);
+          setPhase('done');
+          setTimeout(() => { onPublished(); resetAll(); }, 1300);
+        }
+      } catch {}
+    }, 4000);
+    return () => clearInterval(iv);
+  }, [phase, orderID]);
+
   function resetAll(){ setF({ title:'', venue:'', city:'', startsAt:'', url:'', image:'', description:'' }); setPhase('form'); setOrderID(''); setErr(''); }
   async function startCheckout(){
     if (!f.title.trim()) { setErr('Add an event title.'); return; }
@@ -119,7 +137,7 @@ export function VendorListingModal({ visible, onClose, onPublished }: any){
             <View style={{paddingVertical:20}}>
               <Text style={s.pBig}>Complete your $10 payment in the PayPal window that just opened.</Text>
               <View style={{height:10}}/>
-              <Text style={s.pSm}>Once you've approved it in PayPal, come back here and tap "I've completed payment" to publish your event.</Text>
+              <Text style={s.pSm}>Once you've approved it in PayPal, come back here — your event publishes automatically within a few seconds of approval (or tap the button below).</Text>
               {err ? <Text style={s.errTxt}>{err}</Text> : null}
             </View>
           ) : phase === 'capturing' ? (

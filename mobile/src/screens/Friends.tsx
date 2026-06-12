@@ -2,7 +2,7 @@ import React, { useEffect, useState } from 'react';
 import { View, Text, TextInput, TouchableOpacity, ScrollView, ActivityIndicator, Switch, Share } from 'react-native';
 import { s, BG, MUTED, ACCENT } from '../theme';
 import { PrimaryBtn } from '../components';
-import { ensureIdentity } from '../storage';
+import { ensureIdentity, friendsApi } from '../storage';
 import { API_BASE } from '../config';
 
 // ---------- Friends Screen (invite-code social graph) ----------
@@ -15,12 +15,8 @@ export function FriendsScreen({ profile }: any){
   const [msg, setMsg] = useState('');
   const [loading, setLoading] = useState(true);
 
-  async function loadFriends(uid: string){
-    try {
-      const r = await fetch(API_BASE + '/api/friends', { method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify({ action:'list', userId: uid }) });
-      const d = await r.json();
-      setFriends(d.friends || []);
-    } catch {}
+  async function loadFriends(_uid?: string){
+    try { const d = await friendsApi('list'); setFriends(d.friends || []); } catch {}
   }
   useEffect(() => { (async () => {
     setLoading(true);
@@ -36,8 +32,7 @@ export function FriendsScreen({ profile }: any){
     if (!addCode.trim() || !me?.userId) return;
     setMsg('');
     try {
-      const r = await fetch(API_BASE + '/api/friends', { method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify({ action:'addFriend', userId: me.userId, code: addCode }) });
-      const d = await r.json();
+      const d = await friendsApi('addFriend', { code: addCode });
       if (d.ok) { setAddCode(''); setMsg('Added!'); await loadFriends(me.userId); }
       else setMsg(d.error || 'Could not add that code.');
     } catch { setMsg('Network error.'); }
@@ -46,7 +41,7 @@ export function FriendsScreen({ profile }: any){
     if (!me?.userId) return;
     setMsg('');
     try {
-      await fetch(API_BASE + '/api/friends', { method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify({ action:'setPlan', userId: me.userId, plan: planText, going }) });
+      await friendsApi('setPlan', { plan: planText, going });
       setMsg('Plan updated.');
     } catch { setMsg('Network error.'); }
   }

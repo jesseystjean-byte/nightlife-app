@@ -13,9 +13,12 @@
 // KV keys:  user:{userId} -> profile   |  code:{CODE} -> userId  |  friends:{userId} -> [userId]
 
 import { kvGet, kvSet, kvEnabled, rateLimitOk, clientIp } from './_store';
+import { createHash } from 'crypto';
+
+const sha256 = (x: string) => createHash('sha256').update(x).digest('hex');
 import { cors } from './_paypal';
 
-type User = { userId: string; name?: string; city?: string; vibes?: string[]; code?: string; plan?: string; going?: boolean; updatedAt?: number };
+type User = { userId: string; name?: string; city?: string; vibes?: string[]; code?: string; plan?: string; going?: boolean; updatedAt?: number; secretHash?: string };
 
 function code6(){ return Math.random().toString(36).slice(2, 8).toUpperCase(); }
 
@@ -41,8 +44,22 @@ export default async function handler(req: any, res: any){
     const userId: string = body.userId;
     if (!userId && action !== 'ping') { res.status(400).json({ error: 'userId required' }); return; }
 
+    // DEVICE SECRET: the app sends a per-device secret with every call. The first call that
+    // provides one binds it (hashed) to this userId; afterwards every action must present it.
+    // Stops anyone who learns a userId from impersonating that user. Legacy clients without
+    // a secret keep working only until the real device binds one.
+    const secret: string = typeof body.secret === 'string' ? body.secret : '';
+    const me = await kvGet<User>(`user:${userId}`);
+    if (me?.secretHash) {
+      if (!secret || sha256(secret) !== me.secretHash) { res.status(401).json({ error: 'Unauthorized device for this user.' }); return; }
+    } else if (me && secret) {
+      me.secretHash = sha256(secret);
+      await kvSet(`user:${userId}`, me);
+    }
+
     if (action === 'register') {
-      let user = (await kvGet<User>(`user:${userId}`)) || { userId } as User;
+      let user = me || { userId } as User;
+      if (!user.secretHash && secret) user.secretHash = sha256(secret);
       if (!user.code) {
         const c = await uniqueCode();
         user.code = c;

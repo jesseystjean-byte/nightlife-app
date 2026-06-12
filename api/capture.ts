@@ -29,7 +29,8 @@ export default async function handler(req: any, res: any){
       headers: { Authorization: `Bearer ${token}`, 'content-type': 'application/json' },
     });
     const data = await capRes.json();
-    if (data.status !== 'COMPLETED') { res.status(400).json({ ok: false, status: data.status || 'FAILED', detail: data }); return; }
+    const alreadyCaptured = data?.details?.[0]?.issue === 'ORDER_ALREADY_CAPTURED';
+    if (data.status !== 'COMPLETED' && !alreadyCaptured) { res.status(400).json({ ok: false, status: data.status || 'FAILED', detail: data }); return; }
 
     // payment captured -> publish the event
     const pending = await kvGet<{ event: EventItem }>(`order_${orderID}`);
