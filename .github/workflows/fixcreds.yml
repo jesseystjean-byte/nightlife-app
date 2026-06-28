@@ -16,13 +16,16 @@ jobs:
         env:
           EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
         run: |
-          OUT=""
-          who=$(npx eas-cli@latest whoami 2>&1 | tail -3 || true)
-          OUT="$OUT WHOAMI: $who ||| "
+          npx eas-cli@latest whoami > who.txt 2>&1 || true
           npm install >/dev/null 2>&1 || true
-          # Try a non-interactive build with cache clear — with an ASC API key present,
-          # EAS regenerates a missing/invalid distribution cert automatically.
-          build=$(npx eas-cli@latest build --platform ios --profile production --non-interactive --no-wait --clear-cache 2>&1 | tail -40 || true)
-          OUT="$OUT BUILD: $build"
-          curl -s -X POST https://project-ushrm.vercel.app/api/log -H 'content-type: application/json' --data-binary "$(python3 -c "import json,sys,os; print(json.dumps({'message':'FIXCREDS','stack':os.environ.get('O','')[:1900],'build':'fixcreds'}))" 2>/dev/null || echo '{}')" -d "$(python3 -c "import json,os;print(json.dumps({'message':'FIXCREDS','stack':'''$OUT'''[:1900],'build':'fixcreds'}))" 2>/dev/null)" || true
-          echo "$OUT" | head -c 1500
+          npx eas-cli@latest build --platform ios --profile production --non-interactive --no-wait --clear-cache > build.txt 2>&1 || true
+          { echo "=WHOAMI="; tail -3 who.txt; echo "=BUILD="; tail -45 build.txt; } > all.txt
+          python3 - <<'PY'
+import json,urllib.request
+txt=open('all.txt').read()[-1900:]
+data=json.dumps({"message":"FIXCREDS2","stack":txt,"build":"fixcreds2"}).encode()
+req=urllib.request.Request("https://project-ushrm.vercel.app/api/log",data=data,headers={"content-type":"application/json"})
+try: urllib.request.urlopen(req,timeout=20)
+except Exception as e: print("post err",e)
+PY
+          cat all.txt | head -c 1500
