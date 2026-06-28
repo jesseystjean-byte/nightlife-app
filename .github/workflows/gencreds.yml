@@ -15,25 +15,29 @@ jobs:
         working-directory: mobile
         env:
           EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
+          CI: ""
+          EAS_BUILD_NO_EXPO_GO_WARNING: "true"
         run: |
+          unset CI
           npm install >/dev/null 2>&1 || true
           cat > drive.exp <<'EXP'
-          set timeout 600
-          spawn npx eas-cli@latest build --platform ios --profile production --no-wait
+          set timeout 900
+          spawn env -u CI npx eas-cli@latest credentials --platform ios
           expect {
+            -re "(?i)which build profile.*" { send "production\r"; exp_continue }
+            -re "(?i)what do you want to do.*" { send "\033\[B\r"; exp_continue }
+            -re "(?i)build credentials.*" { send "\r"; exp_continue }
+            -re "(?i)set up a new.*distribution certificate.*" { send "\r"; exp_continue }
             -re "(?i)generate a new apple distribution certificate.*" { send "y\r"; exp_continue }
             -re "(?i)generate a new apple provisioning profile.*" { send "y\r"; exp_continue }
-            -re "(?i)reuse this distribution certificate.*" { send "y\r"; exp_continue }
-            -re "(?i)would you like to set up.*" { send "y\r"; exp_continue }
             -re "(?i)\\(Y/n\\)" { send "y\r"; exp_continue }
             -re "(?i)\\(y/N\\)" { send "y\r"; exp_continue }
-            -re "(?i)select a build profile.*" { send "\r"; exp_continue }
+            timeout { }
             eof
           }
           EXP
           unbuffer expect drive.exp > out.txt 2>&1 || true
-          # strip ansi, keep the meaningful tail
-          sed -r 's/\x1b\[[0-9;?]*[a-zA-Z]//g' out.txt | grep -ivE "EBADENGINE|npm warn|deprecated|inflight" | tail -45 > tail.txt
+          sed -r 's/\x1b\[[0-9;?]*[a-zA-Z]//g' out.txt | grep -ivE "EBADENGINE|npm warn|deprecated|inflight" | tail -50 > tail.txt
           echo "=== TAIL ==="; cat tail.txt
-          jq -Rs '{message:"GENCREDS2", stack:., build:"gencreds2"}' tail.txt > body.json 2>/dev/null || echo '{}' > body.json
+          jq -Rs '{message:"GENCREDS3", stack:., build:"gencreds3"}' tail.txt > body.json 2>/dev/null || echo '{}' > body.json
           curl -s -X POST https://project-ushrm.vercel.app/api/log -H 'content-type: application/json' --data-binary @body.json || true
