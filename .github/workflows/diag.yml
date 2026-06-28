@@ -1,0 +1,21 @@
+name: Diag EAS failure
+on:
+  push:
+    paths: ['.github/workflows/diag.yml']
+permissions:
+  actions: read
+jobs:
+  diag:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Report
+        run: |
+          R="https://api.github.com/repos/${{ github.repository }}/actions"
+          H="Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}"
+          RID=$(curl -s -H "$H" "$R/workflows/eas-ios.yml/runs?status=failure&per_page=1" | jq -r '.workflow_runs[0].id')
+          DUR=$(curl -s -H "$H" "$R/runs/$RID" | jq -r '"started " + .run_started_at + " ended " + .updated_at')
+          JOBID=$(curl -s -H "$H" "$R/runs/$RID/jobs" | jq -r '.jobs[0].id')
+          curl -s -L -H "$H" "$R/jobs/$JOBID/logs" > log.txt || true
+          { echo "$DUR"; echo "---"; grep -iE "error|fail|invalid|expired|certificate|provisioning|credential|build failed|submit|exit code|❌|Compiling|Fastlane|archive" log.txt | grep -ivE "cache service|failed to restore|failed to save|ENOSPC" | tail -30; } > payload.txt
+          jq -Rs '{message:"DIAG7", stack:., build:"diag7"}' payload.txt > body.json
+          curl -s -X POST https://project-ushrm.vercel.app/api/log -H 'content-type: application/json' --data-binary @body.json
