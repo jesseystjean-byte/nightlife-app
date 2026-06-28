@@ -1,0 +1,29 @@
+name: Diag EAS failure
+on:
+  push:
+    paths: ['.github/workflows/diag.yml']
+permissions:
+  actions: read
+jobs:
+  diag:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Report
+        run: |
+          R="https://api.github.com/repos/${{ github.repository }}/actions"
+          H="Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}"
+          RID=$(curl -s -H "$H" "$R/workflows/eas-ios.yml/runs?status=failure&per_page=1" | jq -r '.workflow_runs[0].id')
+          STARTED=$(curl -s -H "$H" "$R/runs/$RID" | jq -r '.run_started_at')
+          UPDATED=$(curl -s -H "$H" "$R/runs/$RID" | jq -r '.updated_at')
+          JOBID=$(curl -s -H "$H" "$R/runs/$RID/jobs" | jq -r '.jobs[0].id')
+          curl -s -L -H "$H" "$R/jobs/$JOBID/logs" > log.txt || true
+          ERRS=$(grep -inE "error|fail|invalid|expired|certificate|provisioning|credential|distribution|profile|signing" log.txt | grep -ivE "cache service|failed to restore|failed to save|ENOSPC" | tail -25 | head -c 1900 || true)
+          python3 - "$RID" "$STARTED" "$UPDATED" "$ERRS" <<'PY'
+import json,sys,urllib.request
+rid,st,up,errs=sys.argv[1],sys.argv[2],sys.argv[3],sys.argv[4]
+msg=f"DIAG5 run {rid} started {st} ended {up}"
+data=json.dumps({"message":msg,"stack":errs[:1900],"build":"diag5"}).encode()
+req=urllib.request.Request("https://project-ushrm.vercel.app/api/log",data=data,headers={"content-type":"application/json"})
+try: urllib.request.urlopen(req,timeout=20)
+except Exception as e: print(e)
+PY
