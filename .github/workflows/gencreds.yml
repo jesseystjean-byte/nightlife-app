@@ -8,7 +8,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
-        with: { node-version: 18 }
+        with: { node-version: 20 }
       - name: Install expect
         run: sudo apt-get update -qq && sudo apt-get install -y expect >/dev/null 2>&1
       - name: Generate distribution certificate interactively
@@ -24,12 +24,16 @@ jobs:
             -re "(?i)generate a new apple distribution certificate.*" { send "y\r"; exp_continue }
             -re "(?i)generate a new apple provisioning profile.*" { send "y\r"; exp_continue }
             -re "(?i)reuse this distribution certificate.*" { send "y\r"; exp_continue }
+            -re "(?i)would you like to set up.*" { send "y\r"; exp_continue }
             -re "(?i)\\(Y/n\\)" { send "y\r"; exp_continue }
-            -re "(?i)select.*" { send "\r"; exp_continue }
+            -re "(?i)\\(y/N\\)" { send "y\r"; exp_continue }
+            -re "(?i)select a build profile.*" { send "\r"; exp_continue }
             eof
           }
           EXP
           unbuffer expect drive.exp > out.txt 2>&1 || true
-          tail -60 out.txt
-          jq -Rs '{message:"GENCREDS", stack:., build:"gencreds"}' out.txt > body.json 2>/dev/null || echo '{}' > body.json
+          # strip ansi, keep the meaningful tail
+          sed -r 's/\x1b\[[0-9;?]*[a-zA-Z]//g' out.txt | grep -ivE "EBADENGINE|npm warn|deprecated|inflight" | tail -45 > tail.txt
+          echo "=== TAIL ==="; cat tail.txt
+          jq -Rs '{message:"GENCREDS2", stack:., build:"gencreds2"}' tail.txt > body.json 2>/dev/null || echo '{}' > body.json
           curl -s -X POST https://project-ushrm.vercel.app/api/log -H 'content-type: application/json' --data-binary @body.json || true
