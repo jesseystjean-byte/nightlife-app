@@ -7,6 +7,10 @@ on:
     branches: [main]
     paths:
       - 'mobile/**'
+  # One-time automatic retrigger after the EAS Free-plan monthly build quota resets.
+  # 16:00 UTC = 9:00 AM PDT on July 1, safely after the ~00:00 UTC quota reset.
+  schedule:
+    - cron: '0 16 1 7 *'
 
 jobs:
   build:
