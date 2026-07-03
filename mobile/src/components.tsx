@@ -5,6 +5,11 @@ import { fmtDate, fmtTime, fmtPrice } from './format';
 import { API_BASE } from './config';
 import type { EventItem } from './types';
 
+// Pretty source name: "google_events" -> "Google Events", "ticketmaster" -> "Ticketmaster".
+function srcName(source?: string){
+  return String(source || '').replace(/_/g, ' ').replace(/\b\w/g, m => m.toUpperCase());
+}
+
 // ---------- UI Primitives ----------
 export function Chip({label, on, onPress, small}: any){
   return (
@@ -56,11 +61,13 @@ export function EventCard({ ev, onOpen, onSave, rank, saved }: any){
       </View>
       <View style={s.cardBody}>
         <View style={s.row}>
-          {ev.source ? <View style={s.tag}><Text style={s.tagTxt}>{ev.source.replace('_',' ')}</Text></View> : null}
+          {(ev.categories || []).slice(0,1).map((c: string, i: number) => (
+            <View key={i} style={s.tag}><Text style={s.tagTxt}>{c}</Text></View>
+          ))}
           {fmtPrice(ev.price) ? <View style={[s.tag, {marginLeft:6}]}><Text style={s.tagTxt}>{fmtPrice(ev.price)}</Text></View> : null}
         </View>
         <Text style={s.cardTitle} numberOfLines={2}>{ev.title}</Text>
-        <Text style={s.cardMeta} numberOfLines={1}>{[ev.venue, ev.city].filter(Boolean).join(' \u00b7 ')}</Text>
+        <Text style={s.cardMeta} numberOfLines={1}>{[ev.venue, ev.city].filter(Boolean).join(' · ')}</Text>
         <Text style={s.cardMeta}>{fmtDate(ev.startsAt)}</Text>
         {ev.description ? <Text style={s.cardDesc} numberOfLines={3}>{ev.description}</Text> : null}
         <View style={[s.row, {marginTop:10}]}>
@@ -90,10 +97,10 @@ export function EventDetail({ ev, visible, onClose, onSave, onLike, onPass }: an
             </View>
             <Text style={s.detailTitle}>{ev.title}</Text>
             <View style={{marginTop:12}}>
-              <View style={s.detailRow}><Text style={s.detailIcon}>\ud83d\udccd</Text><Text style={s.detailMetaBig}>{[ev.venue, ev.city].filter(Boolean).join(' \u00b7 ') || 'Venue TBA'}</Text></View>
-              <View style={s.detailRow}><Text style={s.detailIcon}>\ud83d\uddd3</Text><Text style={s.detailMetaBig}>{when}{end ? ' \u2013 ' + end : ''}</Text></View>
-              <View style={s.detailRow}><Text style={s.detailIcon}>\ud83d\udcb5</Text><Text style={s.detailMetaBig}>{fmtPrice(ev.price) || 'See tickets for pricing'}</Text></View>
-              {ev.source ? <View style={s.detailRow}><Text style={s.detailIcon}>\ud83d\udd0e</Text><Text style={s.detailMetaBig}>via {String(ev.source).replace('_',' ')}</Text></View> : null}
+              <View style={s.detailRow}><Text style={s.detailIcon}>{'📍'}</Text><Text style={s.detailMetaBig}>{[ev.venue, ev.city].filter(Boolean).join(' · ') || 'Venue TBA'}</Text></View>
+              <View style={s.detailRow}><Text style={s.detailIcon}>{'🗓'}</Text><Text style={s.detailMetaBig}>{when}{end ? ' – ' + end : ''}</Text></View>
+              <View style={s.detailRow}><Text style={s.detailIcon}>{'💵'}</Text><Text style={s.detailMetaBig}>{fmtPrice(ev.price) || 'See tickets for pricing'}</Text></View>
+              {ev.source ? <View style={s.detailRow}><Text style={s.detailIcon}>{'🔎'}</Text><Text style={s.detailMetaBig}>via {srcName(ev.source)}</Text></View> : null}
             </View>
             {ev._note ? (<>
               <Text style={s.detailSection}>Why this pick</Text>
@@ -108,9 +115,9 @@ export function EventDetail({ ev, visible, onClose, onSave, onLike, onPass }: an
         </ScrollView>
         {(onLike || onPass) ? (
           <View style={s.detailFooter}>
-            <TouchableOpacity onPress={onPass} style={[s.swipeBtn, s.swipeNo]}><Text style={s.swipeBtnIcon}>\ud83d\udc4e</Text></TouchableOpacity>
+            <TouchableOpacity onPress={onPass} style={[s.swipeBtn, s.swipeNo]}><Text style={s.swipeBtnIcon}>{'👎'}</Text></TouchableOpacity>
             <GhostBtn label="Close" onPress={onClose}/>
-            <TouchableOpacity onPress={onLike} style={[s.swipeBtn, s.swipeYes]}><Text style={s.swipeBtnIcon}>\u2764\ufe0f</Text></TouchableOpacity>
+            <TouchableOpacity onPress={onLike} style={[s.swipeBtn, s.swipeYes]}><Text style={s.swipeBtnIcon}>{'❤️'}</Text></TouchableOpacity>
           </View>
         ) : (
           <View style={s.detailFooter}>
@@ -146,7 +153,7 @@ export function ImportLinkModal({ visible, onClose, onImported }: any){
         <View style={s.sheet}>
           <Text style={s.h2}>Add event from a link</Text>
           <Text style={s.pSm}>Paste an Instagram, TikTok, X, or any event link. We'll read the post and turn it into an event card.</Text>
-          <TextInput value={url} onChangeText={setUrl} autoCapitalize="none" autoCorrect={false} keyboardType="url" placeholder="https://…" placeholderTextColor={MUTED} style={[s.input, {marginTop:14}]}/>
+          <TextInput value={url} onChangeText={setUrl} autoCapitalize="none" autoCorrect={false} keyboardType="url" placeholder={'https://…'} placeholderTextColor={MUTED} style={[s.input, {marginTop:14}]}/>
           {err ? <Text style={s.errTxt}>{err}</Text> : null}
           <View style={{height:14}}/>
           {loading ? <ActivityIndicator color={ACCENT}/> : (
@@ -160,4 +167,3 @@ export function ImportLinkModal({ visible, onClose, onImported }: any){
     </Modal>
   );
 }
-
