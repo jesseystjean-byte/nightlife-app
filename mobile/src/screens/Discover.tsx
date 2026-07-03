@@ -1,8 +1,8 @@
 import React, { useEffect, useState, useRef } from 'react';
-import { View, Text, TextInput, TouchableOpacity, Image, ActivityIndicator, Animated, PanResponder, Dimensions } from 'react-native';
+import { View, Text, TextInput, TouchableOpacity, Image, ActivityIndicator, Animated, PanResponder, Dimensions, ScrollView } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { s, BG, MUTED, ACCENT } from '../theme';
-import { PrimaryBtn, EventDetail, ImportLinkModal } from '../components';
+import { PrimaryBtn, Chip, EventDetail, ImportLinkModal } from '../components';
 import { fetchEvents, useResolvedLocation } from '../api';
 import { SAVED_KEY, PASSED_KEY, IMPORTED_KEY, addSavedEvent, removeSavedEvent, recordPassed } from '../storage';
 import { fmtTime, fmtPrice } from '../format';
@@ -16,11 +16,24 @@ export function Discover({ profile, onEditProfile, onShowSaved }: any){
   const [loading, setLoading] = useState(true);
   const [query, setQuery] = useState('');
   const [activeQuery, setActiveQuery] = useState(''); // the search the current results belong to
+  const [catFilter, setCatFilter] = useState('');     // tap a category chip to browse one kind of event
   const [open, setOpen] = useState<EventItem | null>(null);
   const [saved, setSaved] = useState<string[]>([]);
   const [importing, setImporting] = useState(false);
   const [index, setIndex] = useState(0);
   const loc = useResolvedLocation(profile);
+
+  // The deck the user swipes through: all events, or one category when a chip is selected.
+  const deck = catFilter
+    ? events.filter((e: any) => (e.categories || []).includes(catFilter))
+    : events;
+  // Category chips, ordered by how many events they have (so the busiest kinds come first).
+  const catCounts: Record<string, number> = {};
+  for (const e of events as any[]) {
+    const c = e.categories?.[0];
+    if (c) catCounts[c] = (catCounts[c] || 0) + 1;
+  }
+  const allCats = Object.keys(catCounts).sort((a, b) => catCounts[b] - catCounts[a]);
 
   // --- Tinder-style swipe: drag right to save, left to pass ---
   const SCREEN_W = Dimensions.get('window').width;
@@ -70,6 +83,7 @@ export function Discover({ profile, onEditProfile, onShowSaved }: any){
     const list = [...(q ? [] : fresh), ...(r.events || [])].filter(e => !pa.includes(e.id));
     setEvents(list);
     setIndex(0);
+    setCatFilter('');
     setActiveQuery(q || '');
     setSummary(r.summary || '');
     setLoading(false);
@@ -85,7 +99,7 @@ export function Discover({ profile, onEditProfile, onShowSaved }: any){
     } else { load(q); }
   }
   async function pass(){
-    const cur = events[index];
+    const cur = deck[index];
     if (cur) {
       const praw = await AsyncStorage.getItem(PASSED_KEY);
       const pa: string[] = praw ? JSON.parse(praw) : [];
@@ -95,7 +109,7 @@ export function Discover({ profile, onEditProfile, onShowSaved }: any){
     setIndex(i => i + 1);
   }
   async function like(){
-    const cur = events[index];
+    const cur = deck[index];
     if (cur && !saved.includes(cur.id)) await toggleSave(cur);
     setIndex(i => i + 1);
   }
@@ -118,27 +132,42 @@ export function Discover({ profile, onEditProfile, onShowSaved }: any){
     await AsyncStorage.setItem(SAVED_KEY, JSON.stringify(next));
     if (has) await removeSavedEvent(ev.id); else await addSavedEvent(ev); // full object → Saved + taste
   }
-  
+
   return (
     <View style={{flex:1, backgroundColor: BG}}>
       <View style={s.topBar}>
         <Text style={s.brandSm}>5to9</Text>
         <View style={s.row}>
-          <TouchableOpacity onPress={onShowSaved} style={s.iconBtn}><Text style={s.iconTxt}>{'\u2661'}</Text></TouchableOpacity>
-          <TouchableOpacity onPress={onEditProfile} style={s.avatar}><Text style={s.avatarTxt}>{profile.name?.[0]?.toUpperCase() || '\u2606'}</Text></TouchableOpacity>
+          <TouchableOpacity onPress={onShowSaved} style={s.iconBtn}><Text style={s.iconTxt}>{'♡'}</Text></TouchableOpacity>
+          <TouchableOpacity onPress={onEditProfile} style={s.avatar}><Text style={s.avatarTxt}>{profile.name?.[0]?.toUpperCase() || '☆'}</Text></TouchableOpacity>
         </View>
       </View>
       <View style={s.searchRow}>
         <View style={s.searchBox}>
           <TextInput value={query} onChangeText={setQuery} onSubmitEditing={onTownie} returnKeyType="search" placeholder="Search events" placeholderTextColor={MUTED} style={s.searchInput}/>
         </View>
-        <TouchableOpacity onPress={onTownie} style={s.toniePill}><Text style={s.toniePillTxt}>🤖</Text></TouchableOpacity>
+        <TouchableOpacity onPress={onTownie} style={s.toniePill}><Text style={s.toniePillTxt}>{'🤖'}</Text></TouchableOpacity>
       </View>
+      {!loading && allCats.length > 1 ? (
+        <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{flexGrow:0}} contentContainerStyle={{paddingHorizontal:16, paddingVertical:6, gap:8, flexDirection:'row'}}>
+          <Chip small label={'All (' + events.length + ')'} on={!catFilter} onPress={() => { setCatFilter(''); setIndex(0); }}/>
+          {allCats.slice(0, 14).map(c => (
+            <Chip key={c} small label={c + ' (' + catCounts[c] + ')'} on={catFilter === c} onPress={() => { setCatFilter(c); setIndex(0); }}/>
+          ))}
+        </ScrollView>
+      ) : null}
       {summary ? <Text style={s.summary}>{summary}</Text> : null}
       {loading ? (
-        <View style={s.center}><ActivityIndicator color={ACCENT}/><Text style={s.emptyTxt}>Curating your night\u2026</Text></View>
-      ) : !events[index] ? (
-        activeQuery ? (
+        <View style={s.center}><ActivityIndicator color={ACCENT}/><Text style={s.emptyTxt}>{'Curating your night…'}</Text></View>
+      ) : !deck[index] ? (
+        catFilter ? (
+          <View style={s.center}>
+            <Text style={s.emptyTitle}>{"That's all for " + catFilter}</Text>
+            <Text style={s.emptyTxt}>You've seen every {catFilter} event nearby. Browse the other kinds — there's more out there tonight.</Text>
+            <View style={{height:16}}/>
+            <PrimaryBtn label="Show all events" onPress={() => { setCatFilter(''); setIndex(0); }}/>
+          </View>
+        ) : activeQuery ? (
           <View style={s.center}>
             <Text style={s.emptyTitle}>No matches for “{activeQuery}”</Text>
             <Text style={s.emptyTxt}>Townie only shows genuine matches for a search — no filler. Try different words, or clear the search to see tonight's feed.</Text>
@@ -150,42 +179,42 @@ export function Discover({ profile, onEditProfile, onShowSaved }: any){
         )
       ) : (
         <View style={{flex:1, paddingHorizontal:16, paddingTop:6}}>
-          {(() => { const cur:any = events[index]; const nxt:any = events[index+1]; return (
-          <>
-          <View style={{flex:1, marginBottom:14}}>
-            {nxt ? (
-              <View style={[s.swipeCard, s.swipeCardUnder]} pointerEvents="none">
-                {nxt.image
-                  ? <Image source={{uri: nxt.image}} style={s.swipeImg}/>
-                  : <View style={[s.swipeImg, s.cardImgFallback]}><Text style={s.cardImgFallbackTxt}>{(nxt.title||'5to9')[0].toUpperCase()}</Text></View>}
-                <View style={s.swipeBody}><Text style={s.swipeTitle} numberOfLines={1}>{nxt.title}</Text></View>
+          {(() => { const cur:any = deck[index]; const nxt:any = deck[index+1]; return (
+            <>
+              <View style={{flex:1, marginBottom:14}}>
+                {nxt ? (
+                  <View style={[s.swipeCard, s.swipeCardUnder]} pointerEvents="none">
+                    {nxt.image
+                      ? <Image source={{uri: nxt.image}} style={s.swipeImg}/>
+                      : <View style={[s.swipeImg, s.cardImgFallback]}><Text style={s.cardImgFallbackTxt}>{(nxt.title||'5to9')[0].toUpperCase()}</Text></View>}
+                    <View style={s.swipeBody}><Text style={s.swipeTitle} numberOfLines={1}>{nxt.title}</Text></View>
+                  </View>
+                ) : null}
+                <Animated.View
+                  {...panResponder.panHandlers}
+                  style={[s.swipeCard, {transform: [{ translateX: pan.x }, { translateY: Animated.multiply(pan.y, 0.25) }, { rotate: cardRotate }]}]}
+                >
+                  {cur.image
+                    ? <Image source={{uri: cur.image}} style={s.swipeImg}/>
+                    : <View style={[s.swipeImg, s.cardImgFallback]}><Text style={s.cardImgFallbackTxt}>{(cur.title||'5to9')[0].toUpperCase()}</Text></View>}
+                  <Animated.View style={[s.swipeStamp, s.stampLike, {opacity: likeOpacity}]}><Text style={s.stampLikeTxt}>SAVE</Text></Animated.View>
+                  <Animated.View style={[s.swipeStamp, s.stampNope, {opacity: nopeOpacity}]}><Text style={s.stampNopeTxt}>PASS</Text></Animated.View>
+                  <View style={s.swipeBody}>
+                    <View style={[s.wrap, {marginBottom:8}]}>
+                      {(cur.categories||[]).slice(0,2).map((c:string,i:number)=>(<View key={i} style={s.catChip}><Text style={s.catChipTxt}>{c}</Text></View>))}
+                      {cur._score!=null && cur._score>0 ? <View style={s.matchChip}><Text style={s.matchChipTxt}>{Math.round(cur._score)}% match</Text></View> : null}
+                    </View>
+                    <Text style={s.swipeTitle} numberOfLines={2}>{cur.title}</Text>
+                    <Text style={s.swipeMeta}>{[cur.venue||cur.city, fmtTime(cur.startsAt), fmtPrice(cur.price)].filter(Boolean).join(' · ')}</Text>
+                    {cur._note || cur.description ? <Text style={s.swipeDesc} numberOfLines={2}>{cur._note || cur.description}</Text> : null}
+                  </View>
+                </Animated.View>
               </View>
-            ) : null}
-            <Animated.View
-              {...panResponder.panHandlers}
-              style={[s.swipeCard, {transform: [{ translateX: pan.x }, { translateY: Animated.multiply(pan.y, 0.25) }, { rotate: cardRotate }]}]}
-            >
-              {cur.image
-                ? <Image source={{uri: cur.image}} style={s.swipeImg}/>
-                : <View style={[s.swipeImg, s.cardImgFallback]}><Text style={s.cardImgFallbackTxt}>{(cur.title||'5to9')[0].toUpperCase()}</Text></View>}
-              <Animated.View style={[s.swipeStamp, s.stampLike, {opacity: likeOpacity}]}><Text style={s.stampLikeTxt}>SAVE</Text></Animated.View>
-              <Animated.View style={[s.swipeStamp, s.stampNope, {opacity: nopeOpacity}]}><Text style={s.stampNopeTxt}>PASS</Text></Animated.View>
-              <View style={s.swipeBody}>
-                <View style={[s.wrap, {marginBottom:8}]}>
-                  {(cur.categories||[]).slice(0,2).map((c:string,i:number)=>(<View key={i} style={s.catChip}><Text style={s.catChipTxt}>{c}</Text></View>))}
-                  {cur._score!=null && cur._score>0 ? <View style={s.matchChip}><Text style={s.matchChipTxt}>{Math.round(cur._score)}% match</Text></View> : null}
-                </View>
-                <Text style={s.swipeTitle} numberOfLines={2}>{cur.title}</Text>
-                <Text style={s.swipeMeta}>{[cur.venue||cur.city, fmtTime(cur.startsAt), fmtPrice(cur.price)].filter(Boolean).join('  ·  ')}</Text>
-                {cur._note || cur.description ? <Text style={s.swipeDesc} numberOfLines={2}>{cur._note || cur.description}</Text> : null}
+              <View style={s.swipeActions}>
+                <TouchableOpacity onPress={()=>setOpen(cur)} style={s.detailsBtn}><Text style={s.detailsBtnTxt}>More Details</Text></TouchableOpacity>
               </View>
-            </Animated.View>
-          </View>
-          <View style={s.swipeActions}>
-            <TouchableOpacity onPress={()=>setOpen(cur)} style={s.detailsBtn}><Text style={s.detailsBtnTxt}>More Details</Text></TouchableOpacity>
-          </View>
-          <Text style={s.swipeHint}>Swipe right to save · swipe left to pass</Text>
-          </>
+              <Text style={s.swipeHint}>Swipe right to save · swipe left to pass</Text>
+            </>
           ); })()}
         </View>
       )}
@@ -196,4 +225,3 @@ export function Discover({ profile, onEditProfile, onShowSaved }: any){
     </View>
   );
 }
-
