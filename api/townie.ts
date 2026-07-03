@@ -1,16 +1,16 @@
 // api/townie.ts
-// Vercel Serverless Function. Aggregates events from licensed sources (Eventbrite, Ticketmaster, SeatGeek, Google Places),
+// Vercel Serverless Function. Aggregates events from licensed sources (Eventbrite, Ticketmaster, SeatGeek, Google Events),
 // then asks Claude to rank and explain matches for the user's profile.
 //
 // Required env vars in Vercel:
-//   ANTHROPIC_API_KEY       (required)
-//   EVENTBRITE_TOKEN        (optional — leave blank to skip)
-//   TICKETMASTER_KEY        (optional)
-//   SEATGEEK_CLIENT_ID      (optional)
-//   GOOGLE_PLACES_KEY       (optional)
+//   ANTHROPIC_API_KEY   (required)
+//   EVENTBRITE_TOKEN    (optional — leave blank to skip)
+//   TICKETMASTER_KEY    (optional)
+//   SEATGEEK_CLIENT_ID  (optional)
+//   GOOGLE_PLACES_KEY   (optional)
 //
 // POST body: { profile: {...}, location: { lat, lng, city }, query?: string }
-// Response: { events: [...], summary: string }
+// Response:  { events: [...], summary: string }
 
 import { kvGet, kvSet, rateLimitOk, clientIp } from './_store';
 
@@ -60,6 +60,18 @@ async function safeFetch(url: string, opts?: any): Promise<any> {
   finally { clearTimeout(timer); }
 }
 
+// Run fetch thunks in small staggered batches so we respect upstream rate limits
+// (Ticketmaster allows ~5 req/s) instead of firing one giant burst that gets 429'd.
+async function inBatches<T>(fns: (() => Promise<T>)[], size = 4, gapMs = 350): Promise<T[]> {
+  const out: T[] = [];
+  for (let i = 0; i < fns.length; i += size) {
+    const chunk = fns.slice(i, i + size);
+    out.push(...await Promise.all(chunk.map(f => f())));
+    if (i + size < fns.length) await new Promise(r => setTimeout(r, gapMs));
+  }
+  return out;
+}
+
 async function fromEventbrite(lat: number, lng: number, withinKm: number, kw?: string): Promise<EventItem[]> {
   const token = process.env.EVENTBRITE_TOKEN;
   if (!token) return [];
@@ -84,10 +96,13 @@ async function fromEventbrite(lat: number, lng: number, withinKm: number, kw?: s
   }));
 }
 
-async function fromTicketmaster(lat: number, lng: number, withinKm: number, kw?: string): Promise<EventItem[]> {
+// segment: Ticketmaster classification (Music / Sports / Arts & Theatre / Comedy / Family /
+// Film / Miscellaneous). Sweeping every segment is what guarantees the pool covers ALL event
+// kinds instead of whatever a keyword happens to hit (which skewed the feed toward concerts).
+async function fromTicketmaster(lat: number, lng: number, withinKm: number, kw?: string, segment?: string): Promise<EventItem[]> {
   const key = process.env.TICKETMASTER_KEY;
   if (!key) return [];
-  const url = `https://app.ticketmaster.com/discovery/v2/events.json?latlong=${lat},${lng}&radius=${Math.round(withinKm)}&unit=miles&size=100${kw ? '&keyword=' + encodeURIComponent(kw) : ''}&apikey=${key}`;
+  const url = `https://app.ticketmaster.com/discovery/v2/events.json?latlong=${lat},${lng}&radius=${Math.round(withinKm)}&unit=miles&size=100${kw ? '&keyword=' + encodeURIComponent(kw) : ''}${segment ? '&classificationName=' + encodeURIComponent(segment) : ''}&apikey=${key}`;
   const data = await safeFetch(url);
   const events = data?._embedded?.events || [];
   return events.map((e: any): EventItem => ({
@@ -107,10 +122,12 @@ async function fromTicketmaster(lat: number, lng: number, withinKm: number, kw?:
   }));
 }
 
-async function fromSeatGeek(lat: number, lng: number, withinKm: number, kw?: string): Promise<EventItem[]> {
+// taxonomy: SeatGeek taxonomy name (sports / concert / theater / comedy / family / festival /
+// dance_performance_tour / classical). Same idea as the Ticketmaster segment sweep.
+async function fromSeatGeek(lat: number, lng: number, withinKm: number, kw?: string, taxonomy?: string): Promise<EventItem[]> {
   const id = process.env.SEATGEEK_CLIENT_ID;
   if (!id) return [];
-  const url = `https://api.seatgeek.com/2/events?lat=${lat}&lon=${lng}&range=${Math.round(withinKm)}mi&per_page=100${kw ? '&q=' + encodeURIComponent(kw) : ''}&client_id=${id}`;
+  const url = `https://api.seatgeek.com/2/events?lat=${lat}&lon=${lng}&range=${Math.round(withinKm)}mi&per_page=100${kw ? '&q=' + encodeURIComponent(kw) : ''}${taxonomy ? '&taxonomies.name=' + encodeURIComponent(taxonomy) : ''}&client_id=${id}`;
   const data = await safeFetch(url);
   const events = data?.events || [];
   return events.map((e: any): EventItem => ({
@@ -166,7 +183,9 @@ function parseGDate(d: any): string {
 // Aggregator: events Google has already collected from across the web AND social
 // (venue sites, Facebook events, ticketing, etc.) — compliant, no scraping on our side.
 // Requires SERPAPI_KEY in Vercel (sign up at serpapi.com).
-async function fromGoogleEvents(city: string, query?: string): Promise<EventItem[]> {
+// `label` tags results with the category query that found them, so downstream
+// category chips/filters work even when Google returns no type info.
+async function fromGoogleEvents(city: string, query?: string, label?: string): Promise<EventItem[]> {
   const key = process.env.SERPAPI_KEY;
   if (!key) return [];
   const q = ((query ? query + ' ' : '') + 'events' + (city ? ' in ' + city : '')).trim();
@@ -183,8 +202,48 @@ async function fromGoogleEvents(city: string, query?: string): Promise<EventItem
     url: e.link,
     image: e.thumbnail || e.image,
     description: e.description,
-    categories: e.ticket_info ? ['Tickets'] : undefined,
+    categories: label ? [label] : (e.ticket_info ? ['Tickets'] : undefined),
   }));
+}
+
+// ---- CANONICAL CATEGORIES ---------------------------------------------------------
+// Every event gets tagged with up to two canonical categories inferred from its source
+// classification + title + description. This powers consistent category chips in the app,
+// lets the ranker enforce variety, and makes "every kind of event" visible instead of a
+// wall of concerts. Rules are checked in order; the first two hits win.
+const CATEGORY_RULES: { name: string; re: RegExp }[] = [
+  { name: 'Watch Party',        re: /watch part|viewing part|reality tv|game day bar/ },
+  { name: 'Comedy',             re: /comedy|stand.?up|improv|comedian|roast(?!ery)/ },
+  { name: 'Sports',             re: /\bsports?\b|nba|nfl|mlb|nhl|mls|wnba|soccer|basketball|football|baseball|hockey|wrestling|boxing|\bmma\b|ufc|golf|tennis|rugby|lacrosse|pick.?up|esport|motocross|monster jam|rodeo/ },
+  { name: 'Fitness & Outdoors', re: /run club|running|marathon|\b5k\b|\b10k\b|yoga|pilates|workout|fitness|hike|hiking|climb|cycling|bike ride|kayak|paddle|skate|surf/ },
+  { name: 'Theatre & Dance',    re: /theat|broadway|musical(?! guest)|\bplay\b|opera|ballet|dance performance|dance recital|drag|cabaret|burlesque|circus|magic show|illusion/ },
+  { name: 'Film & Screen',      re: /film|movie|screening|cinema|premiere|documentary|anime night|outdoor movie/ },
+  { name: 'Arts & Culture',     re: /\bart\b|gallery|exhibit|museum|paint|sculpt|photograph|poetry|book club|author|reading|literar|craft night|history|heritage/ },
+  { name: 'Food & Drink',       re: /food|dinner|brunch|tasting|restaurant|wine|beer|brewery|cocktail|coffee|dessert|bbq|barbecue|taco|pizza|ramen|vegan|culinary|happy hour/ },
+  { name: 'Markets & Pop-ups',  re: /market|thrift|vintage|flea|craft fair|pop.?up|bazaar|swap meet|garage sale|makers|artisan/ },
+  { name: 'Games & Trivia',     re: /trivia|quiz|bingo|board game|game night|karaoke|open mic|gaming|arcade|d&d|dungeons|poker|chess/ },
+  { name: 'Classes & Workshops',re: /class|workshop|seminar|lecture|course|lesson|bootcamp|paint and sip|paint & sip|cooking class|dance class|learn to/ },
+  { name: 'Networking & Tech',  re: /network|conference|summit|expo|career|startup|tech meetup|hackathon|entrepreneur|business mixer|job fair/ },
+  { name: 'Nightlife & Parties',re: /party|club night|nightlife|\bdj\b|dance night|rave|rooftop|silent disco|21\+|after ?dark|bar crawl/ },
+  { name: 'Festivals & Fairs',  re: /festival|fair(?!field)|carnival|parade|celebration|fest\b|block party|street fair/ },
+  { name: 'Family & Kids',      re: /family|kids|children|all ages|toddler|storytime|petting zoo|puppet/ },
+  { name: 'Community & Causes', re: /charity|fundrais|volunteer|gala|benefit|community|cultural|faith|church|temple|mosque|pride|holiday|seasonal/ },
+  { name: 'Social & Dating',    re: /speed dating|singles|mixer|meetup|social club|new in town|make friends/ },
+  { name: 'Fashion & Style',    re: /fashion|runway|style|beauty|makeup|sneaker/ },
+  { name: 'Conventions',        re: /convention|comic con|comicon|expo hall|fan fest|cosplay/ },
+  { name: 'Live Music',         re: /concert|music|band|singer|rapper|hip.?hop|jazz|techno|edm|orchestra|symphony|choir|acoustic|indie|rock|country|r&b|reggae|latin night|tour\b/ },
+];
+function normalizeCategories(e: EventItem): EventItem {
+  const hay = ((e.categories || []).join(' ') + ' ' + (e.title || '') + ' ' + (e.description || '')).toLowerCase();
+  const tags: string[] = [];
+  for (const c of CATEGORY_RULES) {
+    if (tags.length >= 2) break;
+    if (c.re.test(hay)) tags.push(c.name);
+  }
+  const orig = (e.categories || []).map(c => String(c)).filter(c =>
+    c && c !== 'Tickets' && !tags.some(t => t.toLowerCase() === c.toLowerCase()));
+  const categories = [...tags, ...orig].slice(0, 3);
+  return { ...e, categories: categories.length ? categories : ['Local Event'] };
 }
 
 // Crisp, type-based fallback images. Source images from Google Events (and some social
@@ -193,16 +252,25 @@ async function fromGoogleEvents(city: string, query?: string): Promise<EventItem
 // SeatGeek / Eventbrite) are kept as-is.
 const IMG = (id: string) => `https://images.unsplash.com/${id}?auto=format&fit=crop&w=900&q=80`;
 const TYPE_IMAGES: { re: RegExp; url: string }[] = [
-  { re: /concert|music|dj|band|festival|rave|techno|hip.?hop|jazz|live music/, url: IMG('photo-1470229722913-7c0e2dbbafd3') },
-  { re: /watch party|game day|sports|nba|nfl|soccer|basketball|football|pick.?up/, url: IMG('photo-1461896836934-ffe607ba8211') },
   { re: /comedy|stand.?up|open mic|improv/, url: IMG('photo-1585699324551-f6c309eedeca') },
+  { re: /watch party|game day|sports|nba|nfl|soccer|basketball|football|pick.?up|hockey|baseball/, url: IMG('photo-1461896836934-ffe607ba8211') },
+  { re: /film|movie|screening|cinema|premiere|documentary/, url: IMG('photo-1489599849927-2ee91cede3ba') },
+  { re: /market|thrift|pop.?up|vintage|flea|craft fair|bazaar|makers/, url: IMG('photo-1488459716781-31db52582fe9') },
+  { re: /food|dinner|brunch|tasting|restaurant|wine|beer|brewery|cocktail|culinary/, url: IMG('photo-1414235077428-338989a2e8c0') },
+  { re: /art|gallery|paint|exhibit|museum|poetry|book|author/, url: IMG('photo-1531058020387-3be344556be6') },
+  { re: /trivia|game night|board game|bingo|quiz|karaoke|gaming|arcade|esport/, url: IMG('photo-1611996575749-79a3a250f948') },
+  { re: /class|workshop|seminar|lecture|course|bootcamp|learn/, url: IMG('photo-1522202176988-66273c2fd55f') },
+  { re: /network|conference|summit|expo|career|startup|hackathon|business/, url: IMG('photo-1540575467063-178a50c2df87') },
+  { re: /run club|running|marathon|5k|fitness|yoga|workout|cycle|hike|climb/, url: IMG('photo-1517649763962-0c623066013b') },
+  { re: /theat|play|musical|broadway|opera|ballet|drag|cabaret|circus/, url: IMG('photo-1507924538820-ede94a04019d') },
+  { re: /family|kids|children|storytime|toddler/, url: IMG('photo-1472162072942-cd5147eb3902') },
+  { re: /festival|fair|carnival|parade|celebration|block party/, url: IMG('photo-1533174072545-7a4b6ad7a6c3') },
+  { re: /charity|fundrais|volunteer|gala|benefit|community|pride/, url: IMG('photo-1559027615-cd4628902d4a') },
+  { re: /speed dating|singles|mixer|social club/, url: IMG('photo-1529156069898-49953e39b3ac') },
+  { re: /fashion|runway|style|beauty|sneaker/, url: IMG('photo-1509631179647-0177331693ae') },
+  { re: /convention|comic con|cosplay|fan fest|anime/, url: IMG('photo-1542751371-adc38448a05e') },
+  { re: /concert|music|dj|band|rave|techno|hip.?hop|jazz|live music|edm|orchestra/, url: IMG('photo-1470229722913-7c0e2dbbafd3') },
   { re: /party|club|nightlife|dance/, url: IMG('photo-1514525253161-7a46d19cd819') },
-  { re: /food|dinner|brunch|tasting|restaurant|wine|beer|brewery/, url: IMG('photo-1414235077428-338989a2e8c0') },
-  { re: /art|gallery|paint|exhibit|museum/, url: IMG('photo-1531058020387-3be344556be6') },
-  { re: /trivia|game night|board game|bingo|quiz/, url: IMG('photo-1611996575749-79a3a250f948') },
-  { re: /thrift|pop.?up|market|vintage|flea|craft fair/, url: IMG('photo-1488459716781-31db52582fe9') },
-  { re: /run club|running|fitness|yoga|workout|cycle/, url: IMG('photo-1517649763962-0c623066013b') },
-  { re: /theat|play|musical|broadway|drag|cabaret/, url: IMG('photo-1507924538820-ede94a04019d') },
 ];
 const DEFAULT_IMG = IMG('photo-1492684223066-81342ee5ff30');
 function bestImage(e: EventItem): string {
@@ -222,7 +290,7 @@ function dedupeAcrossSources(arr: EventItem[]): EventItem[] {
   const seen = new Set<string>(); const out: EventItem[] = [];
   for (const e of arr) {
     const nt = normTitle(e.title).slice(0, 36);
-    if (!nt) { out.push(e); continue; }                 // keep untitled rather than collapse
+    if (!nt) { out.push(e); continue; } // keep untitled rather than collapse
     const key = nt + '|' + (e.startsAt || '').slice(0, 10);
     if (seen.has(key)) continue;
     seen.add(key); out.push(e);
@@ -235,7 +303,7 @@ type Taste = { liked?: string[]; passed?: string[] };
 async function curateWithClaude(profile: Profile, events: EventItem[], query?: string, taste?: Taste): Promise<{ ranked: EventItem[]; summary: string; ai: string }> {
   const key = process.env.ANTHROPIC_API_KEY;
   if (!key || events.length === 0) return { ranked: events, summary: '', ai: key ? 'no_events' : 'no_key' };
-  
+
   // Rank up to 200 events with the AI (keeps cost/context sane); any beyond that still
   // get returned, just unranked at the end, so we never hide matching events.
   const compact = events.slice(0, 200).map(e => ({
@@ -243,7 +311,7 @@ async function curateWithClaude(profile: Profile, events: EventItem[], query?: s
     startsAt: e.startsAt, categories: e.categories,
     price: e.price, description: e.description?.slice(0, 200),
   }));
-  
+
   const prompt = `You are 5to9's event curator. 5to9 is an EVENT FINDER, never a bar or venue finder.
 It covers EVERY kind of going-out and EVERY demographic — not just concerts and shows, but sports
 watch parties, reality-TV viewing nights, thrift/vintage pop-ups, pick-up sports, run clubs, trivia
@@ -259,6 +327,10 @@ HARD RULES:
   leave it out of "ranked".
 - Match each of the user's interests to concrete events. Try to cover MORE THAN ONE of their interests
   rather than 25 versions of the same thing — reward variety of event type.
+- FEED VARIETY IS MANDATORY when USER QUERY is empty: the top 20 must span MULTIPLE canonical
+  categories (music, sports, comedy, food & drink, markets, arts, classes, family, nightlife, …).
+  Never let one category — especially concerts — monopolize the top of the feed. If two events are
+  close in score, prefer the one whose category is less represented above it.
 - Factor in demographics from the profile (age, gender, relationship status, who they go out with,
   crowd/vibe they want). A 21-year-old wanting a rowdy crowd and a 40-year-old wanting a chill date
   night should get different picks from the same list.
@@ -277,8 +349,8 @@ HARD RULES:
 
 USER PROFILE: ${JSON.stringify(profile)}
 TASTE PROFILE: ${taste && ((taste.liked?.length || 0) + (taste.passed?.length || 0)) > 0
-  ? JSON.stringify({ saved: (taste.liked || []).slice(-40), passed: (taste.passed || []).slice(-40) })
-  : '(none yet)'}
+    ? JSON.stringify({ saved: (taste.liked || []).slice(-40), passed: (taste.passed || []).slice(-40) })
+    : '(none yet)'}
 USER QUERY: ${query || '(none)'}
 EVENTS: ${JSON.stringify(compact)}
 
@@ -370,14 +442,36 @@ export default async function handler(req: any, res: any) {
     // happens to be closest. A blank keyword sweep is kept so we never miss general listings.
     const interests: string[] = Array.isArray(profile.interests) ? profile.interests.filter(Boolean) : [];
 
-    // Event TYPES 5to9 always hunts for, so niche going-out (watch parties, reality-TV
-    // nights, thrift pop-ups, run clubs, trivia, pick-up sports) shows up even when the
-    // user never listed them as an interest. This is what makes it an event finder for
-    // EVERY kind of happening rather than only the user's stated tags.
+    // Event TYPES 5to9 always hunts for, so every kind of happening — from watch parties
+    // and run clubs to markets, classes, conventions, fundraisers and festivals — shows up
+    // even when the user never listed it as an interest. This list is what makes 5to9 an
+    // event finder for EVERYTHING, not a concert app.
     const EVENT_TYPE_SEEDS = [
       'sports watch party', 'reality tv watch party', 'trivia night', 'run club',
       'thrift pop-up', 'pick-up sports', 'comedy open mic', 'drag show',
       'live music', 'art walk', 'food festival', 'book club', 'game night',
+      'farmers market', 'night market', 'flea market', 'karaoke night',
+      'film screening', 'art exhibit', 'museum event', 'poetry reading',
+      'dance class', 'cooking class', 'workshop', 'networking event',
+      'tech meetup', 'wine tasting', 'beer festival', 'street fair',
+      'cultural festival', 'charity fundraiser', 'fashion show', 'car show',
+      'convention', 'esports tournament', 'speed dating', 'yoga class',
+      '5k race', 'holiday market', 'paint and sip', 'improv show',
+      'salsa dancing', 'outdoor movie', 'family festival', 'block party',
+    ];
+
+    // Ticketmaster classifications + SeatGeek taxonomies: sweeping these guarantees FULL
+    // coverage of every event kind those APIs carry (sports, comedy, theatre, family, film,
+    // festivals, …) — a keyword can miss things; the category sweep can't.
+    const TM_SEGMENTS = ['Music', 'Sports', 'Arts & Theatre', 'Comedy', 'Family', 'Film', 'Miscellaneous'];
+    const SG_TAXONOMIES = ['concert', 'sports', 'theater', 'comedy', 'family', 'festival', 'dance_performance_tour', 'classical'];
+
+    // Google Events (SerpApi, metered): a rotation of broad category queries so the web/social
+    // sweep also spans every kind of event instead of only generic "events in <city>".
+    const GEV_CATEGORY_QUERIES = [
+      'concerts and live music', 'sports games', 'comedy shows', 'theatre and performing arts',
+      'food and drink festivals', 'markets and pop-ups', 'art exhibitions', 'nightlife and parties',
+      'classes and workshops', 'family friendly events', 'outdoor and fitness events', 'festivals and fairs',
     ];
 
     const dedup = <T extends EventItem>(arr: T[]) => {
@@ -397,7 +491,7 @@ export default async function handler(req: any, res: any) {
     // a short TTL. Per-user ranking still runs fresh below. Specific text searches skip the cache.
     const dayStamp = new Date().toISOString().slice(0, 10);
     const citySlug = (city || '').toLowerCase().trim() || (hasAnchor ? `${lat!.toFixed(2)},${lng!.toFixed(2)}` : 'all');
-    const cacheKey = `pool:v2:${citySlug}:${dayStamp}`;
+    const cacheKey = `pool:v3:${citySlug}:${dayStamp}`;
     const POOL_TTL = 25 * 60 * 1000;
 
     let merged: EventItem[];
@@ -408,26 +502,44 @@ export default async function handler(req: any, res: any) {
       merged = cachedPool.events;
       sourceCounts = { ...(cachedPool.sources || {}), cached: true };
     } else {
-      // Cheap, high-quota sources (Ticketmaster / SeatGeek / Eventbrite): fan out widely.
-      const cheapKeywords = query ? [query] : uniqKw([undefined, ...interests, ...EVENT_TYPE_SEEDS]);
-      // Google Events runs on SerpApi (metered). Keep short but ALWAYS include "watch party".
+      const kwInterests = uniqKw(interests).filter(Boolean) as string[];
+      // Eventbrite: cheap and high-quota — fan out over the full seed list + interests.
+      const ebKeywords = query ? [query] : uniqKw([undefined, ...interests, ...EVENT_TYPE_SEEDS]);
+      // Google Events runs on SerpApi (metered). Interests first, then the category rotation.
       const gevKeywords = query
         ? [query]
-        : uniqKw([undefined, 'watch party', ...interests, ...EVENT_TYPE_SEEDS]).slice(0, 14);
-      // TM/SG/EB need coordinates, so only query them when anchored. Google Events uses the city.
-      const [cheapBatches, gevResults] = await Promise.all([
-        hasAnchor
-          ? Promise.all(cheapKeywords.map(kw => Promise.all([
-              fromEventbrite(lat!, lng!, withinKm, kw),
-              fromTicketmaster(lat!, lng!, withinKm, kw),
-              fromSeatGeek(lat!, lng!, withinKm, kw),
-            ])))
-          : Promise.resolve([] as EventItem[][][]),
-        Promise.all(gevKeywords.map(kw => fromGoogleEvents(city, kw))),
+        : uniqKw([undefined, 'watch party', ...interests, ...GEV_CATEGORY_QUERIES]).slice(0, 14);
+
+      // Ticketmaster: one call per classification segment (full-catalog coverage) + interests.
+      const tmCalls = hasAnchor
+        ? (query
+            ? [() => fromTicketmaster(lat!, lng!, withinKm, query)]
+            : [
+                ...TM_SEGMENTS.map(seg => () => fromTicketmaster(lat!, lng!, withinKm, undefined, seg)),
+                ...kwInterests.map(kw => () => fromTicketmaster(lat!, lng!, withinKm, kw)),
+              ])
+        : [];
+      // SeatGeek: unfiltered sweep + one call per taxonomy + interests.
+      const sgCalls = hasAnchor
+        ? (query
+            ? [() => fromSeatGeek(lat!, lng!, withinKm, query)]
+            : [
+                () => fromSeatGeek(lat!, lng!, withinKm),
+                ...SG_TAXONOMIES.map(tx => () => fromSeatGeek(lat!, lng!, withinKm, undefined, tx)),
+                ...kwInterests.map(kw => () => fromSeatGeek(lat!, lng!, withinKm, kw)),
+              ])
+        : [];
+      const ebCalls = hasAnchor ? ebKeywords.map(kw => () => fromEventbrite(lat!, lng!, withinKm, kw)) : [];
+
+      const [tmBatches, sgBatches, ebBatches, gevResults] = await Promise.all([
+        inBatches(tmCalls, 4, 350),   // respect Ticketmaster's ~5 req/s limit
+        inBatches(sgCalls, 6, 250),
+        Promise.all(ebCalls.map(f => f())),
+        Promise.all(gevKeywords.map(kw => fromGoogleEvents(city, kw, kw))),
       ]);
-      const eb = dedup(cheapBatches.flatMap(b => b[0]));
-      const tm = dedup(cheapBatches.flatMap(b => b[1]));
-      const sg = dedup(cheapBatches.flatMap(b => b[2]));
+      const tm = dedup(tmBatches.flat());
+      const sg = dedup(sgBatches.flat());
+      const eb = dedup(ebBatches.flat());
       const gev = dedup(gevResults.flat());
       let web = await kvGet<EventItem[]>('web_events').then(x => x || []).catch(() => []);
       // On an explicit search, crawled events must actually mention a search term — otherwise
@@ -439,12 +551,15 @@ export default async function handler(req: any, res: any) {
           return terms.some(t => hay.includes(t));
         });
       }
-      // Real, dated events only; de-dup across sources by normalized title + day; crisp images.
-      merged = dedupeAcrossSources([...gev, ...web, ...eb, ...tm, ...sg]).map(e => ({ ...e, image: bestImage(e) }));
+      // Real, dated events only; de-dup across sources by normalized title + day; canonical
+      // category tags on every event; crisp type-matched images.
+      merged = dedupeAcrossSources([...gev, ...web, ...eb, ...tm, ...sg])
+        .map(e => normalizeCategories(e))
+        .map(e => ({ ...e, image: bestImage(e) }));
       sourceCounts = { eventbrite: eb.length, ticketmaster: tm.length, seatgeek: sg.length, googleEvents: gev.length, website: web.length, cached: false };
       if (!query) await kvSet(cacheKey, { at: Date.now(), events: merged, sources: sourceCounts }, 3600).catch(() => {});
     }
-    
+
     // Drop events outside the user's selected radius (miles). THE OLD NYC LEAK: crawled
     // web_events span all launch cities (Boston/NYC/Chicago/Seattle) and JSON-LD events carry
     // no coordinates, so they skipped the distance filter and showed up in EVERY city's feed.
@@ -488,7 +603,7 @@ export default async function handler(req: any, res: any) {
     // result for 10 min so repeat opens are instant and cost zero AI tokens. Searches skip it.
     let ranked: EventItem[]; let summary: string; let ai: string; let rankCached = false;
     const profSig = hashStr(JSON.stringify([profile, taste.liked, taste.passed]));
-    const rankKey = `rank:v1:${citySlug}:${dayStamp}:${profSig}`;
+    const rankKey = `rank:v2:${citySlug}:${dayStamp}:${profSig}`;
     const rankHit = query ? null : await kvGet<{ ranked: EventItem[]; summary: string; ai: string }>(rankKey).catch(() => null);
     if (rankHit && Array.isArray(rankHit.ranked) && rankHit.ranked.length > 0) {
       ranked = rankHit.ranked; summary = rankHit.summary || ''; ai = rankHit.ai || 'ok:cache'; rankCached = true;
