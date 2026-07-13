@@ -552,7 +552,8 @@ export default async function handler(req: any, res: any) {
       // Google Events runs on SerpApi (metered). Interests first, then the category rotation.
       const gevKeywords = query
         ? [query]
-        : uniqKw([undefined, 'watch party', ...interests, ...GEV_CATEGORY_QUERIES]).slice(0, 14);
+        : uniqKw([undefined, 'watch party', 'sports watch party', 'reality tv watch party',
+            ...interests, ...GEV_CATEGORY_QUERIES]).slice(0, 16);
 
       // Ticketmaster: one call per classification segment (full-catalog coverage) + interests.
       const tmCalls = hasAnchor
