@@ -300,13 +300,30 @@ function dedupeAcrossSources(arr: EventItem[]): EventItem[] {
 
 type Taste = { liked?: string[]; passed?: string[] };
 
-async function curateWithClaude(profile: Profile, events: EventItem[], query?: string, taste?: Taste): Promise<{ ranked: EventItem[]; summary: string; ai: string }> {
+async function curateWithClaude(profile: Profile, events: EventItem[], query?: string, taste?: Taste): Promise<{ ranked: EventItem[]; summary: string; ai: string; sentIds: Set<string> }> {
   const key = process.env.ANTHROPIC_API_KEY;
-  if (!key || events.length === 0) return { ranked: events, summary: '', ai: key ? 'no_events' : 'no_key' };
+  if (!key || events.length === 0) return { ranked: events, summary: '', ai: key ? 'no_events' : 'no_key', sentIds: new Set() };
 
-  // Rank up to 200 events with the AI (keeps cost/context sane); any beyond that still
-  // get returned, just unranked at the end, so we never hide matching events.
-  const compact = events.slice(0, 200).map(e => ({
+  // Rank up to 200 events with the AI (keeps cost/context sane). The window is picked
+  // ROUND-ROBIN ACROSS SOURCES (in pool order, so today-first is preserved) — before, it was
+  // simply the first 200 in merge order, which let one source monopolize the AI ranking while
+  // Ticketmaster/SeatGeek events never got scored at all. sentIds records which events the AI
+  // actually saw, so unseen events can be kept in the feed instead of silently dropped.
+  const bySource: Record<string, EventItem[]> = {};
+  for (const e of events) (bySource[e.source] = bySource[e.source] || []).push(e);
+  const lanes = Object.values(bySource);
+  const cap = Math.min(200, events.length);
+  const windowEvs: EventItem[] = [];
+  for (let i = 0; windowEvs.length < cap; i++) {
+    let added = false;
+    for (const lane of lanes) {
+      if (windowEvs.length >= cap) break;
+      if (lane[i]) { windowEvs.push(lane[i]); added = true; }
+    }
+    if (!added) break;
+  }
+  const sentIds = new Set(windowEvs.map(e => e.id));
+  const compact = windowEvs.map(e => ({
     id: e.id, title: e.title, venue: e.venue, city: e.city,
     startsAt: e.startsAt, categories: e.categories,
     price: e.price, description: e.description?.slice(0, 200),
@@ -392,12 +409,12 @@ Return AS MANY matching events as there are — do not cap the list. Rank best f
       const ranked = events
         .map(e => ({ ...e, _score: scoreById[e.id]?.score ?? 0, _note: scoreById[e.id]?.why || '' }))
         .sort((a, b) => (b as any)._score - (a as any)._score);
-      return { ranked, summary: parsed.summary || '', ai: 'ok:' + model };
+      return { ranked, summary: parsed.summary || '', ai: 'ok:' + model, sentIds };
     } catch (e: any) {
       lastErr = model + ':' + (e?.message || 'error').slice(0, 60);
     }
   }
-  return { ranked: events, summary: '', ai: 'failed:' + lastErr };
+  return { ranked: events, summary: '', ai: 'failed:' + lastErr, sentIds };
 }
 
 export default async function handler(req: any, res: any) {
@@ -553,7 +570,9 @@ export default async function handler(req: any, res: any) {
       }
       // Real, dated events only; de-dup across sources by normalized title + day; canonical
       // category tags on every event; crisp type-matched images.
-      merged = dedupeAcrossSources([...gev, ...web, ...eb, ...tm, ...sg])
+      // Ticketmaster/SeatGeek go FIRST so the surviving copy of a cross-source duplicate
+      // is the one with coordinates, real prices, and ticket links.
+      merged = dedupeAcrossSources([...tm, ...sg, ...eb, ...web, ...gev])
         .map(e => normalizeCategories(e))
         .map(e => ({ ...e, image: bestImage(e) }));
       sourceCounts = { eventbrite: eb.length, ticketmaster: tm.length, seatgeek: sg.length, googleEvents: gev.length, website: web.length, cached: false };
@@ -596,31 +615,45 @@ export default async function handler(req: any, res: any) {
       // Date-only events (midnight UTC) name their calendar day directly — don't tz-shift them.
       return (dateOnly(v) ? v.slice(0, 10) : localDay(t)) === todayStr;
     });
-    const pool = todays.length >= 6 ? todays : inRange;
+    // TODAY-FIRST, NEVER TODAY-ONLY: tonight's events lead the feed and upcoming events
+    // (soonest first) follow. The old rule collapsed the pool to today-only whenever >=6
+    // events were on today — starving the feed to a few dozen cards while a thousand
+    // nearby events sat unused in the pool.
+    const todayIds = new Set(todays.map((e: any) => e.id));
+    const upcoming = inRange
+      .filter((e: any) => {
+        if (todayIds.has(e.id)) return false;
+        const t = Date.parse(e.startsAt || '');
+        return isNaN(t) || t > Date.now() - 6 * 3600 * 1000; // keep undated; drop clearly past
+      })
+      .sort((a: any, b: any) => (Date.parse(a.startsAt || '') || 0) - (Date.parse(b.startsAt || '') || 0));
+    const pool = [...todays, ...upcoming];
 
     // PER-USER RANKING CACHE: the AI curation call is the most expensive step and its inputs
-    // (city pool + this user's profile/taste) rarely change within minutes. Cache the curated
+    // (city pool + this user's profile/taste) rarely change within minutes. Cache the CURATED
     // result for 10 min so repeat opens are instant and cost zero AI tokens. Searches skip it.
-    let ranked: EventItem[]; let summary: string; let ai: string; let rankCached = false;
+    let curated: EventItem[]; let summary: string; let ai: string; let rankCached = false;
     const profSig = hashStr(JSON.stringify([profile, taste.liked, taste.passed]));
-    const rankKey = `rank:v2:${citySlug}:${dayStamp}:${profSig}`;
-    const rankHit = query ? null : await kvGet<{ ranked: EventItem[]; summary: string; ai: string }>(rankKey).catch(() => null);
-    if (rankHit && Array.isArray(rankHit.ranked) && rankHit.ranked.length > 0) {
-      ranked = rankHit.ranked; summary = rankHit.summary || ''; ai = rankHit.ai || 'ok:cache'; rankCached = true;
+    const rankKey = `rank:v3:${citySlug}:${dayStamp}:${profSig}`;
+    const rankHit = query ? null : await kvGet<{ events: EventItem[]; summary: string; ai: string }>(rankKey).catch(() => null);
+    if (rankHit && Array.isArray(rankHit.events) && rankHit.events.length > 0) {
+      curated = rankHit.events; summary = rankHit.summary || ''; ai = rankHit.ai || 'ok:cache'; rankCached = true;
     } else {
-      ({ ranked, summary, ai } = await curateWithClaude(profile, pool, query, taste));
-      if (!query && ai.startsWith('ok')) await kvSet(rankKey, { ranked, summary, ai }, 600).catch(() => {});
-    }
-
-    // Respect the AI's exclusions instead of padding the feed with its rejects (the old
-    // behavior sent 0%-match cards like university seminars for a "watch party" search).
-    // - Explicit search: return ONLY genuine matches — few or none beats filler.
-    // - Default feed: use the scored picks whenever there are enough of them.
-    let curated: EventItem[] = ranked;
-    if (ai.startsWith('ok')) {
-      const scored = (ranked as any[]).filter(e => (e._score ?? 0) > 0);
-      if (query) curated = scored;
-      else if (scored.length >= 8) curated = scored;
+      const { ranked, summary: sm, ai: aiStatus, sentIds } = await curateWithClaude(profile, pool, query, taste);
+      summary = sm; ai = aiStatus;
+      // Respect the AI's exclusions instead of padding the feed with its rejects (0%-match
+      // cards like university seminars for a "watch party" search) — but ONLY for events the
+      // AI actually saw. Events outside the 200-event ranking window were never judged, so
+      // they stay in the feed (after the scored picks) instead of being silently dropped.
+      curated = ranked;
+      if (ai.startsWith('ok')) {
+        const scored = (ranked as any[]).filter(e => (e._score ?? 0) > 0);
+        const unseen = (ranked as any[]).filter(e => !sentIds.has(e.id));
+        if (query) curated = scored;
+        else if (scored.length >= 8) curated = [...scored, ...unseen];
+      }
+      curated = curated.slice(0, 300);
+      if (!query && ai.startsWith('ok')) await kvSet(rankKey, { events: curated, summary, ai }, 600).catch(() => {});
     }
 
     // Paid/featured events (vendors who paid via PayPal) ride at the top of the feed.
@@ -633,7 +666,7 @@ export default async function handler(req: any, res: any) {
       });
     } catch {}
     const featuredIds = new Set(featured.map(e => e.id));
-    const finalEvents = [...featured, ...curated.filter(e => !featuredIds.has(e.id))].slice(0, 120);
+    const finalEvents = [...featured, ...curated.filter(e => !featuredIds.has(e.id))].slice(0, 200);
 
     res.status(200).json({
       events: finalEvents,

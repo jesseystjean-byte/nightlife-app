@@ -31,6 +31,8 @@ type EventItem = {
 // (1) Sites whose index pages embed Schema.org Event JSON-LD (nightlife / city networks).
 const SEED_SITES: string[] = [
   'https://everout.com/seattle/events/',
+  'https://everout.com/portland/events/',
+  'https://everout.com/chicago/events/',
   'https://www.thestranger.com/events',
   'https://townhallseattle.org/events/',
   'https://www.thebostoncalendar.com/events',

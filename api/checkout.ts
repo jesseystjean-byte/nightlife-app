@@ -4,15 +4,17 @@
 // Response: { orderID, approveUrl } — the app opens approveUrl for the vendor to pay.
 
 import { PAYPAL_BASE, paypalToken, paypalConfigured, cors } from './_paypal';
-import { kvSet, rateLimitOk, clientIp } from './_store';
+import { kvGet, kvSet, rateLimitOk, clientIp } from './_store';
 
-const FEATURE_PRICE = 10; // USD per featured event
+// LAUNCH MODE: event posting is FREE for now — a price of 0 publishes immediately with no
+// PayPal step. To start charging again, set this back to 10 (the whole PayPal flow below
+// is intact and takes over automatically for any price > 0).
+const FEATURE_PRICE = 0; // USD per featured event
 
 export default async function handler(req: any, res: any){
   cors(res);
   if (req.method === 'OPTIONS') { res.status(200).end(); return; }
   if (req.method !== 'POST') { res.status(405).json({ error: 'POST only' }); return; }
-  if (!paypalConfigured()) { res.status(503).json({ error: 'PayPal not configured. Set PAYPAL_CLIENT_ID / PAYPAL_SECRET in Vercel.' }); return; }
   if (!(await rateLimitOk('checkout:' + clientIp(req), 10))) { res.status(429).json({ error: 'Too many requests — try again in a minute.' }); return; }
 
   try {
@@ -21,6 +23,17 @@ export default async function handler(req: any, res: any){
     const price = Number(body.price) || FEATURE_PRICE;
     if (!event.title) { res.status(400).json({ error: 'event.title is required' }); return; }
 
+    // FREE LAUNCH MODE: publish straight to the featured list, no payment step.
+    if (price <= 0) {
+      const freeId = 'free_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+      const item = { ...event, id: `vip_${freeId}`, source: 'featured', featured: true, paidAt: new Date().toISOString() };
+      const list = (await kvGet<any[]>('featured_events')) || [];
+      await kvSet('featured_events', [item, ...list.filter((x: any) => x.id !== item.id)].slice(0, 200));
+      res.status(200).json({ ok: true, free: true, orderID: freeId, event: item });
+      return;
+    }
+
+    if (!paypalConfigured()) { res.status(503).json({ error: 'PayPal not configured. Set PAYPAL_CLIENT_ID / PAYPAL_SECRET in Vercel.' }); return; }
     const token = await paypalToken();
     if (!token) { res.status(502).json({ error: 'Could not authenticate with PayPal' }); return; }
 

@@ -44,7 +44,7 @@ export function Onboarding({ onDone }: { onDone: (p: Profile) => void }){
           {step === 0 && (<>
             <Text style={s.brand}>5to9</Text>
             <Text style={s.h1}>Your nights, curated.</Text>
-            <Text style={s.pBig}>Tell us a bit about you. We\u2019ll surface events you\u2019ll actually love \u2014 powered by Claude and licensed event data.</Text>
+            <Text style={s.pBig}>{'Tell us a bit about you. We\u2019ll surface events you\u2019ll actually love \u2014 powered by Claude and licensed event data.'}</Text>
             <View style={{height:18}}/>
             <Text style={s.pSm}>Takes about 90 seconds. You can change anything later.</Text>
           </>)}

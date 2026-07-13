@@ -52,10 +52,10 @@ export function VipScreen(){
         <Text style={s.sectionTitle}>For venues & promoters</Text>
         <View style={s.vipCard}>
           <Text style={s.vipCardTitle}>Feature your event</Text>
-          <Text style={s.vipCardSub}>Put your night in front of nearby people whose interests match. Pay per featured event — never any cost to attendees.</Text>
-          <View style={s.vipPriceRow}><Text style={s.vipPrice}>$10</Text><Text style={s.vipPriceUnit}> / featured event</Text></View>
+          <Text style={s.vipCardSub}>Put your night in front of nearby people whose interests match. Never any cost to attendees.</Text>
+          <View style={s.vipPriceRow}><Text style={s.vipPrice}>Free</Text><Text style={s.vipPriceUnit}> during launch</Text></View>
           <PrimaryBtn label="List your event" onPress={()=>setShowForm(true)}/>
-          <Text style={s.vipNote}>Payments are processed securely via PayPal.</Text>
+          <Text style={s.vipNote}>Free for a limited time while we launch.</Text>
         </View>
 
         <Text style={s.sectionTitle}>Auto-post from Instagram</Text>
@@ -102,7 +102,9 @@ export function VendorListingModal({ visible, onClose, onPublished }: any){
     try {
       const r = await fetch(API_BASE + '/api/checkout', { method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify({ event: f }) });
       const d = await r.json();
-      if (!r.ok || !d.approveUrl) { setErr(d.error || 'Could not start PayPal checkout.'); return; }
+      // Free launch mode: the backend publishes immediately — no PayPal step.
+      if (d.free && d.ok) { setPhase('done'); setTimeout(() => { onPublished(); resetAll(); }, 1300); return; }
+      if (!r.ok || !d.approveUrl) { setErr(d.error || 'Could not publish your event. Try again.'); return; }
       setOrderID(d.orderID);
       setPhase('approving');
       Linking.openURL(d.approveUrl);
@@ -148,7 +150,7 @@ export function VendorListingModal({ visible, onClose, onPublished }: any){
         </ScrollView>
         <View style={s.obFooter}>
           <GhostBtn label="Cancel" onPress={()=>{ resetAll(); onClose(); }}/>
-          {phase === 'form' ? <PrimaryBtn label="Pay $10 with PayPal" onPress={startCheckout}/> : null}
+          {phase === 'form' ? <PrimaryBtn label="Publish my event — Free" onPress={startCheckout}/> : null}
           {phase === 'approving' ? <PrimaryBtn label="I've completed payment" onPress={finishCheckout}/> : null}
         </View>
       </SafeAreaView>
