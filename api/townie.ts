@@ -171,6 +171,33 @@ async function fromGooglePlaces(lat: number, lng: number, withinKm: number): Pro
   }));
 }
 
+// Yelp Fusion Events API — real local events (fairs, pop-ups, markets, food events) with a
+// free API key from yelp.com/developers. Set YELP_API_KEY in Vercel to activate; skipped when absent.
+async function fromYelp(lat: number, lng: number, withinKm: number): Promise<EventItem[]> {
+  const key = process.env.YELP_API_KEY;
+  if (!key) return [];
+  const radius = Math.min(Math.round(withinKm * 1609), 40000); // meters; Yelp max 40km
+  const url = `https://api.yelp.com/v3/events?latitude=${lat}&longitude=${lng}&radius=${radius}&limit=50&start_date=${Math.floor(Date.now() / 1000)}`;
+  const data = await safeFetch(url, { headers: { Authorization: `Bearer ${key}` } });
+  const events = data?.events || [];
+  return events.map((e: any): EventItem => ({
+    id: 'yp_' + e.id,
+    source: 'yelp',
+    title: e.name,
+    startsAt: e.time_start,
+    endsAt: e.time_end,
+    venue: e.location?.display_address?.[0],
+    city: e.location?.city,
+    lat: e.latitude,
+    lng: e.longitude,
+    url: e.event_site_url,
+    image: e.image_url,
+    price: e.is_free ? { free: true } : (e.cost != null ? { min: e.cost, max: e.cost_max || undefined, currency: 'USD' } : undefined),
+    categories: [e.category].filter(Boolean),
+    description: e.description ? String(e.description).slice(0, 400) : undefined,
+  }));
+}
+
 function hashStr(s: string){ let h=0; for(let i=0;i<s.length;i++){ h=(h<<5)-h+s.charCodeAt(i); h|=0; } return Math.abs(h).toString(36); }
 function parseGDate(d: any): string {
   const raw = (d?.start_date || d?.when || '').toString();
@@ -548,16 +575,18 @@ export default async function handler(req: any, res: any) {
         : [];
       const ebCalls = hasAnchor ? ebKeywords.map(kw => () => fromEventbrite(lat!, lng!, withinKm, kw)) : [];
 
-      const [tmBatches, sgBatches, ebBatches, gevResults] = await Promise.all([
+      const [tmBatches, sgBatches, ebBatches, gevResults, ypRaw] = await Promise.all([
         inBatches(tmCalls, 4, 350),   // respect Ticketmaster's ~5 req/s limit
         inBatches(sgCalls, 6, 250),
         Promise.all(ebCalls.map(f => f())),
         Promise.all(gevKeywords.map(kw => fromGoogleEvents(city, kw, kw))),
+        hasAnchor ? fromYelp(lat!, lng!, withinKm) : Promise.resolve([] as EventItem[]),
       ]);
       const tm = dedup(tmBatches.flat());
       const sg = dedup(sgBatches.flat());
       const eb = dedup(ebBatches.flat());
       const gev = dedup(gevResults.flat());
+      const yp = dedup(ypRaw);
       let web = await kvGet<EventItem[]>('web_events').then(x => x || []).catch(() => []);
       // On an explicit search, crawled events must actually mention a search term — otherwise
       // unrelated academic/admin calendar entries flood the query results.
@@ -572,10 +601,10 @@ export default async function handler(req: any, res: any) {
       // category tags on every event; crisp type-matched images.
       // Ticketmaster/SeatGeek go FIRST so the surviving copy of a cross-source duplicate
       // is the one with coordinates, real prices, and ticket links.
-      merged = dedupeAcrossSources([...tm, ...sg, ...eb, ...web, ...gev])
+      merged = dedupeAcrossSources([...tm, ...sg, ...yp, ...eb, ...web, ...gev])
         .map(e => normalizeCategories(e))
         .map(e => ({ ...e, image: bestImage(e) }));
-      sourceCounts = { eventbrite: eb.length, ticketmaster: tm.length, seatgeek: sg.length, googleEvents: gev.length, website: web.length, cached: false };
+      sourceCounts = { eventbrite: eb.length, ticketmaster: tm.length, seatgeek: sg.length, yelp: yp.length, googleEvents: gev.length, website: web.length, cached: false };
       if (!query) await kvSet(cacheKey, { at: Date.now(), events: merged, sources: sourceCounts }, 3600).catch(() => {});
     }
 
