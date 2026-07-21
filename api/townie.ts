@@ -327,9 +327,9 @@ function dedupeAcrossSources(arr: EventItem[]): EventItem[] {
 
 type Taste = { liked?: string[]; passed?: string[] };
 
-async function curateWithClaude(profile: Profile, events: EventItem[], query?: string, taste?: Taste): Promise<{ ranked: EventItem[]; summary: string; ai: string; sentIds: Set<string> }> {
+async function curateWithClaude(profile: Profile, events: EventItem[], query?: string, taste?: Taste): Promise<{ ranked: EventItem[]; summary: string; ai: string; sentIds: Set<string>; excludeIds: Set<string> }> {
   const key = process.env.ANTHROPIC_API_KEY;
-  if (!key || events.length === 0) return { ranked: events, summary: '', ai: key ? 'no_events' : 'no_key', sentIds: new Set() };
+  if (!key || events.length === 0) return { ranked: events, summary: '', ai: key ? 'no_events' : 'no_key', sentIds: new Set(), excludeIds: new Set() };
 
   // Rank up to 200 events with the AI (keeps cost/context sane). The window is picked
   // ROUND-ROBIN ACROSS SOURCES (in pool order, so today-first is preserved) — before, it was
@@ -398,8 +398,9 @@ TASTE PROFILE: ${taste && ((taste.liked?.length || 0) + (taste.passed?.length ||
 USER QUERY: ${query || '(none)'}
 EVENTS: ${JSON.stringify(compact)}
 
-Reply ONLY with JSON: { "summary": "1-2 sentence vibe summary", "ranked": [{ "id": "...", "score": 0-100, "why": "personal note tied to their interest/demographic, 1 sentence" }, ...] }
-Return AS MANY matching events as there are — do not cap the list. Rank best first. Score = interest match + demographic fit + variety + time fit + price fit. Exclude only true non-events (bare venue listings).`;
+Reply ONLY with JSON: { "summary": "1-2 sentence vibe summary", "ranked": [{ "id": "...", "score": 0-100, "why": "personal note, max 12 words" }, ...], "exclude": ["id", ...] }
+"ranked": the TOP 60 best-fitting events ONLY, best first (this cap keeps responses fast — everything else still reaches the user, just unranked below your picks). Score = interest match + demographic fit + variety + time fit + price fit.
+"exclude": ids of true NON-EVENTS only (bare venue/restaurant listings with no dated event).`;
 
   // Current models with a fallback chain — the old hardcoded claude-3-5-sonnet-20241022 was
   // retired, which made every ranking call fail SILENTLY (unranked feed, no notes, no summary).
@@ -418,7 +419,7 @@ Return AS MANY matching events as there are — do not cap the list. Rank best f
         },
         body: JSON.stringify({
           model,
-          max_tokens: 8000,
+          max_tokens: 3500,
           messages: [{ role: 'user', content: prompt }],
         }),
       });
@@ -433,15 +434,17 @@ Return AS MANY matching events as there are — do not cap the list. Rank best f
       for (const rk of (parsed.ranked || [])) {
         scoreById[rk.id] = { score: rk.score, why: rk.why };
       }
+      const excludeIds = new Set<string>(Array.isArray(parsed.exclude) ? parsed.exclude.filter((x: any) => typeof x === 'string') : []);
+      // Stable sort: AI picks first by score, everything else keeps pool order (today-first).
       const ranked = events
         .map(e => ({ ...e, _score: scoreById[e.id]?.score ?? 0, _note: scoreById[e.id]?.why || '' }))
         .sort((a, b) => (b as any)._score - (a as any)._score);
-      return { ranked, summary: parsed.summary || '', ai: 'ok:' + model, sentIds };
+      return { ranked, summary: parsed.summary || '', ai: 'ok:' + model, sentIds, excludeIds };
     } catch (e: any) {
       lastErr = model + ':' + (e?.message || 'error').slice(0, 60);
     }
   }
-  return { ranked: events, summary: '', ai: 'failed:' + lastErr, sentIds };
+  return { ranked: events, summary: '', ai: 'failed:' + lastErr, sentIds, excludeIds: new Set() };
 }
 
 export default async function handler(req: any, res: any) {
@@ -663,24 +666,24 @@ export default async function handler(req: any, res: any) {
     // (city pool + this user's profile/taste) rarely change within minutes. Cache the CURATED
     // result for 10 min so repeat opens are instant and cost zero AI tokens. Searches skip it.
     let curated: EventItem[]; let summary: string; let ai: string; let rankCached = false;
-    const profSig = hashStr(JSON.stringify([profile, taste.liked, taste.passed]));
+    // Taste is bucketed (per 5 swipes) so a single swipe doesn't invalidate the cache and
+    // force the next open through the slow uncached path. Fresh ranks still use full taste.
+    const profSig = hashStr(JSON.stringify([profile, Math.floor((taste.liked?.length || 0) / 5), Math.floor((taste.passed?.length || 0) / 5)]));
     const rankKey = `rank:v3:${citySlug}:${dayStamp}:${profSig}`;
     const rankHit = query ? null : await kvGet<{ events: EventItem[]; summary: string; ai: string }>(rankKey).catch(() => null);
     if (rankHit && Array.isArray(rankHit.events) && rankHit.events.length > 0) {
       curated = rankHit.events; summary = rankHit.summary || ''; ai = rankHit.ai || 'ok:cache'; rankCached = true;
     } else {
-      const { ranked, summary: sm, ai: aiStatus, sentIds } = await curateWithClaude(profile, pool, query, taste);
+      const { ranked, summary: sm, ai: aiStatus, sentIds, excludeIds } = await curateWithClaude(profile, pool, query, taste);
       summary = sm; ai = aiStatus;
-      // Respect the AI's exclusions instead of padding the feed with its rejects (0%-match
-      // cards like university seminars for a "watch party" search) — but ONLY for events the
-      // AI actually saw. Events outside the 200-event ranking window were never judged, so
-      // they stay in the feed (after the scored picks) instead of being silently dropped.
+      // AI ranks only its TOP 60 (keeps the call fast). Everything else stays in the feed
+      // below the ranked picks — except ids the AI explicitly excluded as true non-events.
       curated = ranked;
       if (ai.startsWith('ok')) {
         const scored = (ranked as any[]).filter(e => (e._score ?? 0) > 0);
-        const unseen = (ranked as any[]).filter(e => !sentIds.has(e.id));
+        const rest = (ranked as any[]).filter(e => !((e._score ?? 0) > 0) && !excludeIds.has(e.id));
         if (query) curated = scored;
-        else if (scored.length >= 8) curated = [...scored, ...unseen];
+        else if (scored.length >= 8) curated = [...scored, ...rest];
       }
       curated = curated.slice(0, 300);
       if (!query && ai.startsWith('ok')) await kvSet(rankKey, { events: curated, summary, ai }, 600).catch(() => {});
