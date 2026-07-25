@@ -178,7 +178,7 @@ export function Discover({ profile, onEditProfile, onShowSaved }: any){
           <View style={s.center}><Text style={s.emptyTitle}>That's everything for now</Text><Text style={s.emptyTxt}>Check back later, widen your radius, or ask Townie.</Text><View style={{height:16}}/><PrimaryBtn label="Reload" onPress={()=>load()}/></View>
         )
       ) : (
-        <View style={{flex:1, paddingHorizontal:16, paddingTop:6}}>
+        <View style={{flex:1, paddingHorizontal:16, paddingTop:6, paddingBottom:70}}>
           {(() => { const cur:any = deck[index]; const nxt:any = deck[index+1]; return (
             <>
               <View style={{flex:1, marginBottom:14}}>

@@ -331,7 +331,7 @@ function dedupeAcrossSources(arr: EventItem[]): EventItem[] {
 
 type Taste = { liked?: string[]; passed?: string[] };
 
-async function curateWithClaude(profile: Profile, events: EventItem[], query?: string, taste?: Taste, budgetMs = 11000): Promise<{ ranked: EventItem[]; summary: string; ai: string; sentIds: Set<string>; excludeIds: Set<string> }> {
+async function curateWithClaude(profile: Profile, events: EventItem[], query?: string, taste?: Taste, budgetMs = 4500): Promise<{ ranked: EventItem[]; summary: string; ai: string; sentIds: Set<string>; excludeIds: Set<string> }> {
   const key = process.env.ANTHROPIC_API_KEY;
   if (!key || events.length === 0) return { ranked: events, summary: '', ai: key ? 'no_events' : 'no_key', sentIds: new Set(), excludeIds: new Set() };
 
@@ -700,7 +700,7 @@ export default async function handler(req: any, res: any) {
       // today-first pool immediately instead of risking a killed request with no events.
       curated = pool.slice(0, 300); summary = ''; ai = 'skipped:low_budget';
     } else {
-      const aiBudget = Math.min(11000, SOFT_DEADLINE - Date.now() - 2000);
+      const aiBudget = Math.min(4500, SOFT_DEADLINE - Date.now() - 2000);
       const { ranked, summary: sm, ai: aiStatus, sentIds, excludeIds } = await curateWithClaude(profile, pool, query, taste, aiBudget);
       summary = sm; ai = aiStatus;
       // AI ranks only its TOP 60 (keeps the call fast). Everything else stays in the feed
