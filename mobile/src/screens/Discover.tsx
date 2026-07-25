@@ -2,7 +2,7 @@ import React, { useEffect, useState, useRef } from 'react';
 import { View, Text, TextInput, TouchableOpacity, Image, ActivityIndicator, Animated, PanResponder, Dimensions, ScrollView } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { s, BG, MUTED, ACCENT } from '../theme';
-import { PrimaryBtn, Chip, EventDetail, ImportLinkModal } from '../components';
+import { PrimaryBtn, Chip, EventDetail, ImportLinkModal, LoadingClock } from '../components';
 import { fetchEvents, useResolvedLocation } from '../api';
 import { SAVED_KEY, PASSED_KEY, IMPORTED_KEY, addSavedEvent, removeSavedEvent, recordPassed } from '../storage';
 import { fmtTime, fmtPrice } from '../format';
@@ -62,6 +62,10 @@ export function Discover({ profile, onEditProfile, onShowSaved }: any){
   const cardRotate = pan.x.interpolate({ inputRange: [-SCREEN_W, 0, SCREEN_W], outputRange: ['-12deg', '0deg', '12deg'] });
   const likeOpacity = pan.x.interpolate({ inputRange: [20, 120], outputRange: [0, 1], extrapolate: 'clamp' });
   const nopeOpacity = pan.x.interpolate({ inputRange: [-120, -20], outputRange: [1, 0], extrapolate: 'clamp' });
+  // Gentle entrance so each new card eases in rather than snapping — softer, less rigid feel.
+  const appear = useRef(new Animated.Value(1)).current;
+  useEffect(() => { appear.setValue(0.55); Animated.spring(appear, { toValue: 1, friction: 7, tension: 90, useNativeDriver: false }).start(); }, [index]);
+  const appearScale = appear.interpolate({ inputRange: [0.55, 1], outputRange: [0.95, 1] });
 
   useEffect(() => { (async () => {
     const sv = await AsyncStorage.getItem(SAVED_KEY);
@@ -158,7 +162,7 @@ export function Discover({ profile, onEditProfile, onShowSaved }: any){
       ) : null}
       {summary ? <Text style={s.summary}>{summary}</Text> : null}
       {loading ? (
-        <View style={s.center}><ActivityIndicator color={ACCENT}/><Text style={s.emptyTxt}>{'Curating your night…'}</Text></View>
+        <View style={s.center}><LoadingClock/><View style={{height:16}}/><Text style={s.emptyTxt}>{'Curating your night…'}</Text></View>
       ) : !deck[index] ? (
         catFilter ? (
           <View style={s.center}>
@@ -192,7 +196,7 @@ export function Discover({ profile, onEditProfile, onShowSaved }: any){
                 ) : null}
                 <Animated.View
                   {...panResponder.panHandlers}
-                  style={[s.swipeCard, {transform: [{ translateX: pan.x }, { translateY: Animated.multiply(pan.y, 0.25) }, { rotate: cardRotate }]}]}
+                  style={[s.swipeCard, { opacity: appear, transform: [{ translateX: pan.x }, { translateY: Animated.multiply(pan.y, 0.25) }, { rotate: cardRotate }, { scale: appearScale }] }]}
                 >
                   {cur.image
                     ? <Image source={{uri: cur.image}} style={s.swipeImg}/>
@@ -211,9 +215,7 @@ export function Discover({ profile, onEditProfile, onShowSaved }: any){
                 </Animated.View>
               </View>
               <View style={s.swipeActions}>
-                <TouchableOpacity onPress={pass} style={[s.swipeBtn, s.swipeNo]}><Text style={s.swipeBtnIcon}>{'\uD83D\uDC4E'}</Text></TouchableOpacity>
                 <TouchableOpacity onPress={()=>setOpen(cur)} style={s.detailsBtn}><Text style={s.detailsBtnTxt}>More Details</Text></TouchableOpacity>
-                <TouchableOpacity onPress={like} style={[s.swipeBtn, s.swipeYes]}><Text style={s.swipeBtnIcon}>{'\u2764\uFE0F'}</Text></TouchableOpacity>
               </View>
               <Text style={s.swipeHint}>Swipe right to save · swipe left to pass</Text>
             </>

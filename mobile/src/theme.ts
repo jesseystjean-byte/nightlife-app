@@ -69,7 +69,7 @@ export const s = StyleSheet.create({
   detailTitle: { color: FG, fontSize:24, fontWeight:'800' },
   detailMeta: { color: MUTED, fontSize:14, marginTop:4 },
   detailDesc: { color: FG, fontSize:15, lineHeight:22, marginTop:14 },
-  detailFooter: { flexDirection:'row', gap:10, padding:14, paddingBottom:24, borderTopWidth:1, borderTopColor: LINE },
+  detailFooter: { flexDirection:'row', alignItems:'center', justifyContent:'space-between', gap:10, paddingHorizontal:22, paddingTop:14, paddingBottom:30, borderTopWidth:1, borderTopColor: LINE, backgroundColor: BG },
 
   // --- added: sleeker look + new screens ---
   kicker: { color: ACCENT, fontSize:11, fontWeight:'800', letterSpacing:1.5, textTransform:'uppercase', marginBottom:2 },
@@ -148,4 +148,12 @@ export const s = StyleSheet.create({
   cosmicWrap: { position:'absolute', top:0, left:0, right:0, bottom:0, overflow:'hidden', backgroundColor: BG },
   nebula: { position:'absolute', width:320, height:320, borderRadius:160 },
   star: { position:'absolute', backgroundColor:'#FFFFFF' },
+  // --- spinning clock loader (pure Views + Animated, on-brand for 5to9) ---
+  clockWrap: { width:64, height:64, alignItems:'center', justifyContent:'center' },
+  clockFace: { position:'absolute', width:64, height:64, borderRadius:32, borderWidth:2, borderColor:'rgba(139,123,255,0.5)', backgroundColor: CARD },
+  clockLayer: { position:'absolute', width:64, height:64 },
+  clockHandMin: { position:'absolute', top:11, left:31, width:2, height:21, borderRadius:1, backgroundColor: ACCENT },
+  clockHandHour: { position:'absolute', top:19, left:30, width:3, height:13, borderRadius:1.5, backgroundColor: ACCENT2 },
+  clockTick: { position:'absolute', top:3, left:31, width:2, height:5, borderRadius:1, backgroundColor: MUTED },
+  clockCenter: { position:'absolute', top:29, left:29, width:6, height:6, borderRadius:3, backgroundColor: ACCENT },
 });

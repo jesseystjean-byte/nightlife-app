@@ -1,5 +1,5 @@
-import React, { useState } from 'react';
-import { View, Text, TextInput, TouchableOpacity, ScrollView, Image, ActivityIndicator, Modal, SafeAreaView, Linking } from 'react-native';
+import React, { useState, useRef, useEffect } from 'react';
+import { View, Text, TextInput, TouchableOpacity, ScrollView, Image, ActivityIndicator, Modal, SafeAreaView, Linking, Animated, Easing } from 'react-native';
 import { s, ACCENT, MUTED, BG } from './theme';
 import { fmtDate, fmtTime, fmtPrice } from './format';
 import { API_BASE } from './config';
@@ -32,6 +32,31 @@ export function CosmicBg(){
       {COSMIC_STARS.map((st, i) => (
         <View key={i} style={[s.star, { left: (st.x + '%') as any, top: (st.y + '%') as any, width: st.s, height: st.s, borderRadius: st.s/2, opacity: st.o }]} />
       ))}
+    </View>
+  );
+}
+
+// ---------- Spinning clock loader ----------
+// A fast-spinning clock face built from plain Views + Animated (no SVG / native deps).
+// On-brand for 5to9 and used while events are being curated.
+export function LoadingClock(){
+  const m = useRef(new Animated.Value(0)).current;
+  const h = useRef(new Animated.Value(0)).current;
+  useEffect(() => {
+    const a1 = Animated.loop(Animated.timing(m, { toValue: 1, duration: 650, easing: Easing.linear, useNativeDriver: true }));
+    const a2 = Animated.loop(Animated.timing(h, { toValue: 1, duration: 2400, easing: Easing.linear, useNativeDriver: true }));
+    a1.start(); a2.start();
+    return () => { a1.stop(); a2.stop(); };
+  }, []);
+  const rm = m.interpolate({ inputRange: [0, 1], outputRange: ['0deg', '360deg'] });
+  const rh = h.interpolate({ inputRange: [0, 1], outputRange: ['0deg', '360deg'] });
+  return (
+    <View style={s.clockWrap}>
+      <View style={s.clockFace} />
+      <View style={s.clockTick} />
+      <Animated.View style={[s.clockLayer, { transform: [{ rotate: rh }] }]}><View style={s.clockHandHour} /></Animated.View>
+      <Animated.View style={[s.clockLayer, { transform: [{ rotate: rm }] }]}><View style={s.clockHandMin} /></Animated.View>
+      <View style={s.clockCenter} />
     </View>
   );
 }
