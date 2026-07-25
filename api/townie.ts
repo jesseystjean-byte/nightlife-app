@@ -431,7 +431,7 @@ Reply ONLY with JSON: { "summary": "1-2 sentence vibe summary", "ranked": [{ "id
         },
         body: JSON.stringify({
           model,
-          max_tokens: 500,
+          max_tokens: 1200,
           messages: [{ role: 'user', content: prompt }],
         }),
       });
