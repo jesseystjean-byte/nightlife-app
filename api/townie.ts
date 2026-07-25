@@ -331,7 +331,7 @@ function dedupeAcrossSources(arr: EventItem[]): EventItem[] {
 
 type Taste = { liked?: string[]; passed?: string[] };
 
-async function curateWithClaude(profile: Profile, events: EventItem[], query?: string, taste?: Taste, budgetMs = 9000): Promise<{ ranked: EventItem[]; summary: string; ai: string; sentIds: Set<string>; excludeIds: Set<string> }> {
+async function curateWithClaude(profile: Profile, events: EventItem[], query?: string, taste?: Taste, budgetMs = 11000): Promise<{ ranked: EventItem[]; summary: string; ai: string; sentIds: Set<string>; excludeIds: Set<string> }> {
   const key = process.env.ANTHROPIC_API_KEY;
   if (!key || events.length === 0) return { ranked: events, summary: '', ai: key ? 'no_events' : 'no_key', sentIds: new Set(), excludeIds: new Set() };
 
@@ -343,7 +343,7 @@ async function curateWithClaude(profile: Profile, events: EventItem[], query?: s
   const bySource: Record<string, EventItem[]> = {};
   for (const e of events) (bySource[e.source] = bySource[e.source] || []).push(e);
   const lanes = Object.values(bySource);
-  const cap = Math.min(80, events.length);
+  const cap = Math.min(50, events.length);
   const windowEvs: EventItem[] = [];
   for (let i = 0; windowEvs.length < cap; i++) {
     let added = false;
@@ -402,8 +402,8 @@ TASTE PROFILE: ${taste && ((taste.liked?.length || 0) + (taste.passed?.length ||
 USER QUERY: ${query || '(none)'}
 EVENTS: ${JSON.stringify(compact)}
 
-Reply ONLY with JSON: { "summary": "1-2 sentence vibe summary", "ranked": [{ "id": "...", "score": 0-100, "why": "personal note, max 12 words" }, ...], "exclude": ["id", ...] }
-"ranked": the TOP 30 best-fitting events ONLY, best first (this cap keeps responses fast — everything else still reaches the user, just unranked below your picks). Score = interest match + demographic fit + variety + time fit + price fit.
+Reply ONLY with JSON: { "summary": "1-2 sentence vibe summary", "ranked": [{ "id": "...", "score": 0-100, "why": "personal note, max 8 words" }, ...], "exclude": ["id", ...] }
+"ranked": the TOP 12 best-fitting events ONLY, best first (this cap keeps responses fast — everything else still reaches the user, just unranked below your picks). Score = interest match + demographic fit + variety + time fit + price fit.
 "exclude": ids of true NON-EVENTS only (bare venue/restaurant listings with no dated event).`;
 
   // Current models with a fallback chain — the old hardcoded claude-3-5-sonnet-20241022 was
@@ -431,7 +431,7 @@ Reply ONLY with JSON: { "summary": "1-2 sentence vibe summary", "ranked": [{ "id
         },
         body: JSON.stringify({
           model,
-          max_tokens: 1600,
+          max_tokens: 650,
           messages: [{ role: 'user', content: prompt }],
         }),
       });
@@ -696,7 +696,7 @@ export default async function handler(req: any, res: any) {
       // today-first pool immediately instead of risking a killed request with no events.
       curated = pool.slice(0, 300); summary = ''; ai = 'skipped:low_budget';
     } else {
-      const aiBudget = Math.min(9000, SOFT_DEADLINE - Date.now() - 2000);
+      const aiBudget = Math.min(11000, SOFT_DEADLINE - Date.now() - 2000);
       const { ranked, summary: sm, ai: aiStatus, sentIds, excludeIds } = await curateWithClaude(profile, pool, query, taste, aiBudget);
       summary = sm; ai = aiStatus;
       // AI ranks only its TOP 60 (keeps the call fast). Everything else stays in the feed
@@ -706,7 +706,7 @@ export default async function handler(req: any, res: any) {
         const scored = (ranked as any[]).filter(e => (e._score ?? 0) > 0);
         const rest = (ranked as any[]).filter(e => !((e._score ?? 0) > 0) && !excludeIds.has(e.id));
         if (query) curated = scored;
-        else if (scored.length >= 8) curated = [...scored, ...rest];
+        else if (scored.length >= 6) curated = [...scored, ...rest];
       }
       curated = curated.slice(0, 300);
       if (!query && ai.startsWith('ok')) await kvSet(rankKey, { events: curated, summary, ai }, 600).catch(() => {});
