@@ -10,6 +10,32 @@ function srcName(source?: string){
   return String(source || '').replace(/_/g, ' ').replace(/\b\w/g, m => m.toUpperCase());
 }
 
+// ---------- Cosmic backdrop ----------
+// Deep-space background rendered behind every tab: a solid base, two faint violet
+// nebula glows, and a fixed scatter of stars. Pure <View>s — no images, no native
+// modules — so it is safe on every device and adds nothing to the build.
+const COSMIC_STARS: { x: number; y: number; s: number; o: number }[] = [
+  {x:8,y:6,s:2,o:0.5},{x:22,y:12,s:1,o:0.35},{x:37,y:4,s:2,o:0.6},{x:52,y:9,s:1,o:0.4},
+  {x:68,y:5,s:2,o:0.55},{x:81,y:13,s:1,o:0.3},{x:93,y:7,s:2,o:0.5},{x:14,y:22,s:1,o:0.4},
+  {x:29,y:28,s:2,o:0.45},{x:46,y:24,s:1,o:0.3},{x:61,y:30,s:2,o:0.5},{x:77,y:26,s:1,o:0.35},
+  {x:90,y:33,s:2,o:0.45},{x:6,y:40,s:1,o:0.35},{x:20,y:46,s:2,o:0.5},{x:35,y:52,s:1,o:0.3},
+  {x:50,y:44,s:2,o:0.4},{x:64,y:50,s:1,o:0.35},{x:79,y:56,s:2,o:0.5},{x:92,y:48,s:1,o:0.3},
+  {x:11,y:63,s:2,o:0.45},{x:26,y:70,s:1,o:0.3},{x:42,y:66,s:2,o:0.5},{x:58,y:72,s:1,o:0.35},
+  {x:73,y:68,s:2,o:0.4},{x:88,y:74,s:1,o:0.3},{x:16,y:82,s:2,o:0.5},{x:33,y:88,s:1,o:0.3},
+  {x:49,y:84,s:2,o:0.45},{x:66,y:90,s:1,o:0.35},{x:82,y:86,s:2,o:0.5},{x:95,y:92,s:1,o:0.3},
+];
+export function CosmicBg(){
+  return (
+    <View pointerEvents="none" style={s.cosmicWrap}>
+      <View style={[s.nebula, { top:-90, right:-70, backgroundColor:'rgba(139,123,255,0.16)' }]} />
+      <View style={[s.nebula, { bottom:20, left:-100, backgroundColor:'rgba(84,74,183,0.15)' }]} />
+      {COSMIC_STARS.map((st, i) => (
+        <View key={i} style={[s.star, { left: (st.x + '%') as any, top: (st.y + '%') as any, width: st.s, height: st.s, borderRadius: st.s/2, opacity: st.o }]} />
+      ))}
+    </View>
+  );
+}
+
 // ---------- UI Primitives ----------
 export function Chip({label, on, onPress, small}: any){
   return (

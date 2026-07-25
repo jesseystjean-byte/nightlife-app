@@ -50,14 +50,14 @@ export function FriendsScreen({ profile }: any){
   }
 
   if (loading) return (
-    <View style={{flex:1, backgroundColor: BG}}>
+    <View style={{flex:1, backgroundColor:'transparent'}}>
       <View style={s.topBar}><View><Text style={s.kicker}>YOUR CREW</Text><Text style={s.brandSm}>Friends</Text></View></View>
       <View style={s.center}><ActivityIndicator color={ACCENT}/></View>
     </View>
   );
 
   return (
-    <View style={{flex:1, backgroundColor: BG}}>
+    <View style={{flex:1, backgroundColor:'transparent'}}>
       <View style={s.topBar}><View><Text style={s.kicker}>YOUR CREW</Text><Text style={s.brandSm}>Friends</Text></View></View>
       <ScrollView contentContainerStyle={{padding:16, paddingBottom:140}}>
         <View style={s.vipCard}>

@@ -134,7 +134,7 @@ export function Discover({ profile, onEditProfile, onShowSaved }: any){
   }
 
   return (
-    <View style={{flex:1, backgroundColor: BG}}>
+    <View style={{flex:1, backgroundColor:'transparent'}}>
       <View style={s.topBar}>
         <Text style={s.brandSm}>5to9</Text>
         <View style={s.row}>

@@ -1,11 +1,13 @@
 import { StyleSheet } from 'react-native';
 
-export const BG = '#0B0B0F';
-export const FG = '#F5F5F7';
-export const MUTED = '#8A8A92';
-export const CARD = '#15151B';
-export const ACCENT = '#D9FF3D';
-export const LINE = '#222229';
+export const BG = '#08090F';        // deep space base
+export const FG = '#F4F5FB';
+export const MUTED = '#8C8EA6';     // cooler grey for secondary text
+export const CARD = '#14161F';      // slightly lifted, blue-tinted surface
+export const CARD2 = '#1C1F2B';     // higher elevation / pressed states
+export const ACCENT = '#D9FF3D';    // signature lime (brand)
+export const ACCENT2 = '#8B7BFF';   // violet glow for accents/gradients
+export const LINE = '#242739';      // soft violet-tinted hairline
 
 
 // ---------- Styles ----------
@@ -24,7 +26,7 @@ export const s = StyleSheet.create({
   hint: { color: MUTED, fontSize:12, marginTop:6 },
   input: { backgroundColor: CARD, color: FG, borderRadius:12, paddingHorizontal:14, paddingVertical:14, fontSize:16, borderWidth:1, borderColor: LINE },
   wrap: { flexDirection:'row', flexWrap:'wrap', gap:8 },
-  chip: { paddingHorizontal:14, paddingVertical:10, borderRadius:999, borderWidth:1, borderColor: LINE, backgroundColor: CARD, marginRight:8, marginBottom:8 },
+  chip: { paddingHorizontal:16, paddingVertical:11, borderRadius:999, borderWidth:1, borderColor: LINE, backgroundColor: CARD, marginRight:8, marginBottom:8 },
   chipSm: { paddingHorizontal:12, paddingVertical:7 },
   chipOn: { backgroundColor: ACCENT, borderColor: ACCENT },
   chipTxt: { color: FG, fontSize:14 },
@@ -33,37 +35,37 @@ export const s = StyleSheet.create({
   progT: { height:4, backgroundColor: LINE, borderRadius:2, overflow:'hidden' },
   progF: { height:4, backgroundColor: ACCENT },
   obFooter: { flexDirection:'row', alignItems:'center', justifyContent:'space-between', padding:14, paddingBottom:24, borderTopWidth:1, borderTopColor: LINE, backgroundColor: BG, gap:10 },
-  btn: { backgroundColor: ACCENT, paddingHorizontal:22, paddingVertical:14, borderRadius:999, flex:1, alignItems:'center' },
+  btn: { backgroundColor: ACCENT, paddingHorizontal:24, paddingVertical:16, borderRadius:999, flex:1, alignItems:'center' },
   btnDis: { opacity:0.4 },
   btnTxt: { color:'#000', fontWeight:'800', fontSize:15 },
   ghost: { paddingHorizontal:18, paddingVertical:14, borderRadius:999 },
   ghostTxt: { color: FG, fontWeight:'600' },
-  topBar: { flexDirection:'row', alignItems:'center', justifyContent:'space-between', paddingHorizontal:16, paddingVertical:12, borderBottomWidth:1, borderBottomColor: LINE },
-  brandSm: { color: ACCENT, fontSize:22, fontWeight:'900', letterSpacing:-0.5 },
-  avatar: { width:36, height:36, borderRadius:18, backgroundColor: CARD, alignItems:'center', justifyContent:'center', borderWidth:1, borderColor: LINE },
+  topBar: { flexDirection:'row', alignItems:'center', justifyContent:'space-between', paddingHorizontal:20, paddingTop:10, paddingBottom:14 },
+  brandSm: { color: ACCENT, fontSize:26, fontWeight:'900', letterSpacing:-1 },
+  avatar: { width:42, height:42, borderRadius:21, backgroundColor: CARD, alignItems:'center', justifyContent:'center', borderWidth:1, borderColor: LINE },
   avatarTxt: { color: FG, fontWeight:'700' },
-  searchRow: { flexDirection:'row', alignItems:'center', paddingHorizontal:14, paddingVertical:10, gap:8 },
-  searchBox: { flex:1, backgroundColor: CARD, borderRadius:12, borderWidth:1, borderColor: LINE, paddingHorizontal:14 },
-  searchInput: { color: FG, fontSize:15, paddingVertical:12 },
+  searchRow: { flexDirection:'row', alignItems:'center', paddingHorizontal:20, paddingVertical:12, gap:10 },
+  searchBox: { flex:1, backgroundColor: CARD, borderRadius:16, borderWidth:1, borderColor: LINE, paddingHorizontal:16 },
+  searchInput: { color: FG, fontSize:16, paddingVertical:15 },
   townieBtn: { backgroundColor: ACCENT, paddingHorizontal:16, paddingVertical:12, borderRadius:12 },
   townieBtnTxt: { color:'#000', fontWeight:'800' },
-  summary: { color: MUTED, paddingHorizontal:16, paddingBottom:6, fontStyle:'italic' },
+  summary: { color: MUTED, paddingHorizontal:20, paddingTop:2, paddingBottom:8, fontStyle:'italic', lineHeight:20 },
   center: { flex:1, alignItems:'center', justifyContent:'center', padding:30 },
   emptyTitle: { color: FG, fontSize:18, fontWeight:'700', marginTop:10 },
   emptyTxt: { color: MUTED, fontSize:14, textAlign:'center', marginTop:6 },
-  card: { backgroundColor: CARD, borderRadius:18, overflow:'hidden', borderWidth:1, borderColor: LINE },
-  cardImg: { width:'100%', height:180, backgroundColor:'#1a1a22' },
-  cardBody: { padding:14 },
+  card: { backgroundColor: CARD, borderRadius:24, overflow:'hidden', borderWidth:1, borderColor: LINE },
+  cardImg: { width:'100%', height:200, backgroundColor:'#1a1c26' },
+  cardBody: { padding:18 },
   tag: { backgroundColor:'#222', paddingHorizontal:8, paddingVertical:4, borderRadius:6 },
   tagTxt: { color: MUTED, fontSize:11, textTransform:'uppercase', letterSpacing:0.5 },
-  cardTitle: { color: FG, fontSize:18, fontWeight:'700', marginTop:8 },
+  cardTitle: { color: FG, fontSize:20, fontWeight:'800', letterSpacing:-0.3, marginTop:10, lineHeight:25 },
   cardMeta: { color: MUTED, fontSize:13, marginTop:3 },
   cardDesc: { color: FG, fontSize:14, marginTop:8, lineHeight:20 },
   actSm: { paddingHorizontal:14, paddingVertical:8, borderRadius:999, backgroundColor:'#222' },
   actDetailsTxt: { color: FG, fontSize:13, fontWeight:'700' },
-  tabBar: { position:'absolute', bottom:0, left:0, right:0, flexDirection:'row', backgroundColor: BG, borderTopWidth:1, borderTopColor: LINE, paddingBottom:24, paddingTop:8 },
+  tabBar: { position:'absolute', bottom:0, left:0, right:0, flexDirection:'row', backgroundColor:'rgba(8,9,15,0.94)', borderTopWidth:1, borderTopColor: LINE, paddingBottom:28, paddingTop:12 },
   tabItem: { flex:1, alignItems:'center', paddingVertical:8 },
-  tabLabel: { color: MUTED, fontSize:13, fontWeight:'700' },
+  tabLabel: { color: MUTED, fontSize:13, fontWeight:'700', letterSpacing:0.3 },
   detailTitle: { color: FG, fontSize:24, fontWeight:'800' },
   detailMeta: { color: MUTED, fontSize:14, marginTop:4 },
   detailDesc: { color: FG, fontSize:15, lineHeight:22, marginTop:14 },
@@ -72,7 +74,7 @@ export const s = StyleSheet.create({
   // --- added: sleeker look + new screens ---
   kicker: { color: ACCENT, fontSize:11, fontWeight:'800', letterSpacing:1.5, textTransform:'uppercase', marginBottom:2 },
   subhead: { color: MUTED, fontSize:13, paddingHorizontal:16, paddingTop:2, paddingBottom:6 },
-  iconBtn: { width:36, height:36, borderRadius:18, backgroundColor: CARD, alignItems:'center', justifyContent:'center', borderWidth:1, borderColor: LINE, marginRight:8 },
+  iconBtn: { width:42, height:42, borderRadius:21, backgroundColor: CARD, alignItems:'center', justifyContent:'center', borderWidth:1, borderColor: LINE, marginRight:10 },
   iconTxt: { color: FG, fontSize:16 },
   sectionTitle: { color: FG, fontSize:16, fontWeight:'800', marginTop:22, marginBottom:12 },
   cardImgFallback: { alignItems:'center', justifyContent:'center', backgroundColor:'#1c1c24' },
@@ -108,17 +110,17 @@ export const s = StyleSheet.create({
   errTxt: { color:'#ff6b6b', fontSize:13, marginTop:10 },
   codeBig: { color: ACCENT, fontSize:34, fontWeight:'900', letterSpacing:4, marginVertical:6 },
   // --- Discover swipe layout ---
-  toniePill: { backgroundColor: CARD, borderWidth:1, borderColor: ACCENT, borderRadius:999, paddingHorizontal:14, paddingVertical:11, justifyContent:'center' },
+  toniePill: { backgroundColor: CARD, borderWidth:1, borderColor: ACCENT, borderRadius:18, paddingHorizontal:16, paddingVertical:15, justifyContent:'center' },
   toniePillTxt: { color: ACCENT, fontWeight:'800', fontSize:14 },
-  swipeCard: { flex:1, backgroundColor: CARD, borderRadius:22, overflow:'hidden', borderWidth:1, borderColor: LINE, marginBottom:14 },
+  swipeCard: { flex:1, backgroundColor: CARD, borderRadius:28, overflow:'hidden', borderWidth:1, borderColor:'rgba(139,123,255,0.35)', marginBottom:16 },
   swipeImg: { width:'100%', flex:1, minHeight:200, backgroundColor:'#1a1a22' },
-  swipeBody: { padding:16 },
+  swipeBody: { padding:20 },
   catChip: { backgroundColor:'rgba(217,255,61,0.14)', borderWidth:1, borderColor: ACCENT, borderRadius:999, paddingHorizontal:12, paddingVertical:5, marginRight:8, marginBottom:6 },
   catChipTxt: { color: ACCENT, fontSize:12, fontWeight:'700' },
   matchChip: { backgroundColor: ACCENT, borderRadius:999, paddingHorizontal:12, paddingVertical:5, marginBottom:6 },
   matchChipTxt: { color:'#000', fontSize:12, fontWeight:'800' },
-  swipeTitle: { color: FG, fontSize:26, fontWeight:'800', marginTop:2 },
-  swipeMeta: { color: MUTED, fontSize:14, marginTop:6 },
+  swipeTitle: { color: FG, fontSize:28, fontWeight:'800', letterSpacing:-0.5, marginTop:4, lineHeight:32 },
+  swipeMeta: { color: MUTED, fontSize:15, marginTop:8 },
   swipeDesc: { color: FG, fontSize:14, fontStyle:'italic', marginTop:8, lineHeight:20 },
   swipeActions: { flexDirection:'row', alignItems:'center', justifyContent:'space-between', paddingBottom:24, gap:14 },
   swipeBtn: { width:64, height:64, borderRadius:32, alignItems:'center', justifyContent:'center', borderWidth:1, borderColor: LINE },
@@ -142,4 +144,8 @@ export const s = StyleSheet.create({
   swipeHint: { color: MUTED, fontSize:12, textAlign:'center', paddingBottom:10, marginTop:-14 },
   linkBtn: { marginTop:18, backgroundColor: ACCENT, borderRadius:12, paddingVertical:14, alignItems:'center' },
   linkBtnTxt: { color:'#000', fontWeight:'800', fontSize:15 },
+  // --- cosmic backdrop (pure Views, no native deps) ---
+  cosmicWrap: { position:'absolute', top:0, left:0, right:0, bottom:0, overflow:'hidden', backgroundColor: BG },
+  nebula: { position:'absolute', width:320, height:320, borderRadius:160 },
+  star: { position:'absolute', backgroundColor:'#FFFFFF' },
 });

@@ -14,6 +14,10 @@
 
 import { kvGet, kvSet, rateLimitOk, clientIp } from './_store';
 
+// Give the function room to gather sources + rank, but our own soft deadline
+// (see handler) always self-returns well before this hard limit.
+export const config = { maxDuration: 30 };
+
 type Profile = {
   name?: string; birthYear?: number; gender?: string;
   city?: string; maxDistanceKm?: number;
@@ -327,7 +331,7 @@ function dedupeAcrossSources(arr: EventItem[]): EventItem[] {
 
 type Taste = { liked?: string[]; passed?: string[] };
 
-async function curateWithClaude(profile: Profile, events: EventItem[], query?: string, taste?: Taste): Promise<{ ranked: EventItem[]; summary: string; ai: string; sentIds: Set<string>; excludeIds: Set<string> }> {
+async function curateWithClaude(profile: Profile, events: EventItem[], query?: string, taste?: Taste, budgetMs = 13000): Promise<{ ranked: EventItem[]; summary: string; ai: string; sentIds: Set<string>; excludeIds: Set<string> }> {
   const key = process.env.ANTHROPIC_API_KEY;
   if (!key || events.length === 0) return { ranked: events, summary: '', ai: key ? 'no_events' : 'no_key', sentIds: new Set(), excludeIds: new Set() };
 
@@ -408,10 +412,18 @@ Reply ONLY with JSON: { "summary": "1-2 sentence vibe summary", "ranked": [{ "id
   // outage is visible in `sources.ai` instead of invisible.
   const MODELS = ['claude-haiku-4-5-20251001', 'claude-sonnet-4-6'];
   let lastErr = 'unknown';
+  // Hard budget for the whole ranking step. If it elapses, we bail and the caller
+  // falls back to the deterministic today-first ranking so events STILL reach the user
+  // instead of the request hanging until the platform kills it (the old no-events bug).
+  const aiDeadline = Date.now() + budgetMs;
   for (const model of MODELS) {
+    if (Date.now() >= aiDeadline) { lastErr = 'budget_exhausted'; break; }
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), Math.max(3000, aiDeadline - Date.now()));
     try {
       const r = await fetch('https://api.anthropic.com/v1/messages', {
         method: 'POST',
+        signal: ctrl.signal,
         headers: {
           'content-type': 'application/json',
           'x-api-key': key,
@@ -423,6 +435,7 @@ Reply ONLY with JSON: { "summary": "1-2 sentence vibe summary", "ranked": [{ "id
           messages: [{ role: 'user', content: prompt }],
         }),
       });
+      clearTimeout(timer);
       if (!r.ok) { lastErr = model + ':http_' + r.status; continue; }
       const data = await r.json();
       const text = data?.content?.[0]?.text || '';
@@ -441,6 +454,7 @@ Reply ONLY with JSON: { "summary": "1-2 sentence vibe summary", "ranked": [{ "id
         .sort((a, b) => (b as any)._score - (a as any)._score);
       return { ranked, summary: parsed.summary || '', ai: 'ok:' + model, sentIds, excludeIds };
     } catch (e: any) {
+      clearTimeout(timer);
       lastErr = model + ':' + (e?.message || 'error').slice(0, 60);
     }
   }
@@ -460,6 +474,10 @@ export default async function handler(req: any, res: any) {
   }
 
   try {
+    // Self-return before Vercel's hard function limit so the app always gets a
+    // response (partial if needed) rather than a killed request and an empty feed.
+    const HANDLER_START = Date.now();
+    const SOFT_DEADLINE = HANDLER_START + 26000;
     const body = typeof req.body === 'string' ? JSON.parse(req.body) : (req.body || {});
     const profile: Profile = body.profile || {};
     const withinKm = profile.maxDistanceKm || 25;
@@ -556,7 +574,7 @@ export default async function handler(req: any, res: any) {
       const gevKeywords = query
         ? [query]
         : uniqKw([undefined, 'watch party', 'sports watch party', 'reality tv watch party',
-            ...interests, ...GEV_CATEGORY_QUERIES]).slice(0, 16);
+            ...interests, ...GEV_CATEGORY_QUERIES]).slice(0, 8);
 
       // Ticketmaster: one call per classification segment (full-catalog coverage) + interests.
       const tmCalls = hasAnchor
@@ -582,8 +600,8 @@ export default async function handler(req: any, res: any) {
       const [tmBatches, sgBatches, ebBatches, gevResults, ypRaw] = await Promise.all([
         inBatches(tmCalls, 4, 350),   // respect Ticketmaster's ~5 req/s limit
         inBatches(sgCalls, 6, 250),
-        Promise.all(ebCalls.map(f => f())),
-        Promise.all(gevKeywords.map(kw => fromGoogleEvents(city, kw, kw))),
+        inBatches(ebCalls, 8, 200),
+        inBatches(gevKeywords.map(kw => () => fromGoogleEvents(city, kw, kw)), 4, 200),
         hasAnchor ? fromYelp(lat!, lng!, withinKm) : Promise.resolve([] as EventItem[]),
       ]);
       const tm = dedup(tmBatches.flat());
@@ -673,8 +691,13 @@ export default async function handler(req: any, res: any) {
     const rankHit = query ? null : await kvGet<{ events: EventItem[]; summary: string; ai: string }>(rankKey).catch(() => null);
     if (rankHit && Array.isArray(rankHit.events) && rankHit.events.length > 0) {
       curated = rankHit.events; summary = rankHit.summary || ''; ai = rankHit.ai || 'ok:cache'; rankCached = true;
+    } else if (pool.length === 0 || Date.now() >= SOFT_DEADLINE - 3500) {
+      // No time left in the budget (or nothing to rank) — return the deterministic
+      // today-first pool immediately instead of risking a killed request with no events.
+      curated = pool.slice(0, 300); summary = ''; ai = 'skipped:low_budget';
     } else {
-      const { ranked, summary: sm, ai: aiStatus, sentIds, excludeIds } = await curateWithClaude(profile, pool, query, taste);
+      const aiBudget = Math.min(14000, SOFT_DEADLINE - Date.now() - 2000);
+      const { ranked, summary: sm, ai: aiStatus, sentIds, excludeIds } = await curateWithClaude(profile, pool, query, taste, aiBudget);
       summary = sm; ai = aiStatus;
       // AI ranks only its TOP 60 (keeps the call fast). Everything else stays in the feed
       // below the ranked picks — except ids the AI explicitly excluded as true non-events.

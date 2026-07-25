@@ -44,7 +44,7 @@ export function StandoutScreen({ profile, onEditProfile, onShowSaved }: any){
     if (has) await removeSavedEvent(ev.id); else await addSavedEvent(ev);
   }
   return (
-    <View style={{flex:1, backgroundColor: BG}}>
+    <View style={{flex:1, backgroundColor:'transparent'}}>
       <View style={s.topBar}>
         <View><Text style={s.kicker}>TONIGHT</Text><Text style={s.brandSm}>Standouts</Text></View>
         <View style={s.row}>

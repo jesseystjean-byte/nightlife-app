@@ -18,12 +18,26 @@ async function getClient() {
   if (!REDIS_URL) return null;
   if (client && (client as any).isOpen) return client;
   if (!client) {
-    client = createClient({ url: REDIS_URL });
+    client = createClient({
+      url: REDIS_URL,
+      socket: {
+        connectTimeout: 2000,
+        // Give up reconnecting quickly so a dead/misconfigured Redis can never hang a request.
+        reconnectStrategy: (retries: number) => (retries > 2 ? false : Math.min(retries * 100, 400)),
+      },
+    });
     client.on('error', () => { /* swallow; calls fall back to no-op */ });
   }
   if (!(client as any).isOpen) {
     connecting = connecting || client.connect();
-    try { await connecting; } finally { connecting = null; }
+    try {
+      // Never let a slow/unreachable Redis stall the whole serverless request.
+      await Promise.race([
+        connecting,
+        new Promise((_, rej) => setTimeout(() => rej(new Error('redis_connect_timeout')), 2500)),
+      ]);
+    } catch { client = null; connecting = null; return null; }
+    finally { connecting = null; }
   }
   return client;
 }

@@ -25,7 +25,7 @@ export function VipScreen(){
   }
   useEffect(() => { loadFeatured(); }, []);
   return (
-    <ScrollView style={{flex:1, backgroundColor: BG}} contentContainerStyle={{paddingBottom:120}}>
+    <ScrollView style={{flex:1, backgroundColor:'transparent'}} contentContainerStyle={{paddingBottom:120}}>
       <View style={s.topBar}><View><Text style={s.kicker}>5TO9</Text><Text style={s.brandSm}>VIP</Text></View></View>
       <View style={{padding:18}}>
         <View style={s.vipHero}>

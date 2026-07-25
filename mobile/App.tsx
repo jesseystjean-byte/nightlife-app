@@ -5,6 +5,7 @@ import { StatusBar } from 'expo-status-bar';
 import { s, BG, ACCENT, MUTED } from './src/theme';
 import { PROFILE_KEY } from './src/storage';
 import { initErrorReporting } from './src/reporting';
+import { CosmicBg } from './src/components';
 import { Onboarding } from './src/screens/Onboarding';
 import { Discover } from './src/screens/Discover';
 import { SavedList } from './src/screens/SavedList';
@@ -56,6 +57,7 @@ export default function App(){
   return (
     <SafeAreaView style={{flex:1, backgroundColor: BG}}>
       <StatusBar style="light"/>
+      <CosmicBg/>
       {tab === 'discover' && <Discover profile={profile} onEditProfile={()=>setEditing(true)} onShowSaved={()=>setShowSaved(true)}/>}
       {tab === 'standout' && <StandoutScreen profile={profile} onEditProfile={()=>setEditing(true)} onShowSaved={()=>setShowSaved(true)}/>}
       {tab === 'friends' && <FriendsScreen profile={profile}/>}
