@@ -211,7 +211,9 @@ export function Discover({ profile, onEditProfile, onShowSaved }: any){
                 </Animated.View>
               </View>
               <View style={s.swipeActions}>
+                <TouchableOpacity onPress={pass} style={[s.swipeBtn, s.swipeNo]}><Text style={s.swipeBtnIcon}>{'\uD83D\uDC4E'}</Text></TouchableOpacity>
                 <TouchableOpacity onPress={()=>setOpen(cur)} style={s.detailsBtn}><Text style={s.detailsBtnTxt}>More Details</Text></TouchableOpacity>
+                <TouchableOpacity onPress={like} style={[s.swipeBtn, s.swipeYes]}><Text style={s.swipeBtnIcon}>{'\u2764\uFE0F'}</Text></TouchableOpacity>
               </View>
               <Text style={s.swipeHint}>Swipe right to save · swipe left to pass</Text>
             </>
