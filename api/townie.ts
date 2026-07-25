@@ -410,7 +410,7 @@ Reply ONLY with JSON: { "summary": "1-2 sentence vibe summary", "ranked": [{ "id
   // retired, which made every ranking call fail SILENTLY (unranked feed, no notes, no summary).
   // We now try current models in order and surface the AI status in the response so a ranking
   // outage is visible in `sources.ai` instead of invisible.
-  const MODELS = ['claude-haiku-4-5-20251001', 'claude-sonnet-4-6'];
+  const MODELS = ['claude-haiku-4-5-20251001', 'claude-sonnet-5'];
   let lastErr = 'unknown';
   // Hard budget for the whole ranking step. If it elapses, we bail and the caller
   // falls back to the deterministic today-first ranking so events STILL reach the user
@@ -436,7 +436,11 @@ Reply ONLY with JSON: { "summary": "1-2 sentence vibe summary", "ranked": [{ "id
         }),
       });
       clearTimeout(timer);
-      if (!r.ok) { lastErr = model + ':http_' + r.status; continue; }
+      if (!r.ok) {
+        const body = await r.text().catch(() => '');
+        lastErr = model + ':http_' + r.status + (body ? ':' + body.replace(/\s+/g, ' ').slice(0, 140) : '');
+        continue;
+      }
       const data = await r.json();
       const text = data?.content?.[0]?.text || '';
       const jsonStart = text.indexOf('{');
