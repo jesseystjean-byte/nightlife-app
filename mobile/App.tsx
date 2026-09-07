@@ -52,6 +52,10 @@ export default function App(){
     await AsyncStorage.setItem(PROFILE_KEY, JSON.stringify(p));
     setProfile(p); setEditing(false);
   }
+  // After the user deletes their data, drop back to a clean first-launch state.
+  function handleDeleteData(){
+    setProfile(null); setEditing(false); setShowSaved(false); setTab('discover');
+  }
   if (loading) return <View style={[s.center,{backgroundColor:BG, flex:1}]}><ActivityIndicator color={ACCENT}/></View>;
   if (!profile || !profile.onboardingComplete) return <Onboarding onDone={handleOnboardDone}/>;
   return (
@@ -63,7 +67,7 @@ export default function App(){
       {tab === 'friends' && <FriendsScreen profile={profile}/>}
       {tab === 'vip' && <VipScreen/>}
       <TabBar tab={tab} setTab={setTab}/>
-      {editing && <EditProfile profile={profile} onSave={handleSaveProfile} onClose={()=>setEditing(false)}/>}
+      {editing && <EditProfile profile={profile} onSave={handleSaveProfile} onClose={()=>setEditing(false)} onDelete={handleDeleteData}/>}
       {showSaved && (
         <Modal visible animationType="slide" onRequestClose={()=>setShowSaved(false)}>
           <SafeAreaView style={{flex:1, backgroundColor: BG}}>
@@ -74,4 +78,3 @@ export default function App(){
     </SafeAreaView>
   );
 }
-

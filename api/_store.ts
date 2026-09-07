@@ -76,6 +76,15 @@ export async function rateLimitOk(bucketKey: string, maxPerMinute: number): Prom
   } catch { return true; }
 }
 
+export async function kvDel(...keys: string[]): Promise<boolean> {
+  try {
+    const c = await getClient();
+    if (!c || !keys.length) return false;
+    await c.del(keys);
+    return true;
+  } catch { return false; }
+}
+
 // Capped list push for lightweight client error logs.
 export async function kvPushCapped(listKey: string, value: any, cap: number): Promise<boolean> {
   try {
