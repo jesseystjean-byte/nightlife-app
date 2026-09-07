@@ -32,6 +32,10 @@ export function Onboarding({ onDone }: { onDone: (p: Profile) => void }){
     setStep(step + 1);
   }
   function back(){ if (step > 0) setStep(step - 1); }
+  // App Store Guideline 5.1.1(v): users must be able to reach non-account
+  // features without entering personal info. Skip drops straight into the feed
+  // with an empty (un-personalized) profile; they can set preferences later.
+  function skip(){ onDone({ ...EMPTY_PROFILE, onboardingComplete: true }); }
   return (
     <SafeAreaView style={{flex:1, backgroundColor: BG}}>
       <StatusBar style="light" />
@@ -44,9 +48,12 @@ export function Onboarding({ onDone }: { onDone: (p: Profile) => void }){
           {step === 0 && (<>
             <Text style={s.brand}>5to9</Text>
             <Text style={s.h1}>Your nights, curated.</Text>
-            <Text style={s.pBig}>{'Tell us a bit about you. We\u2019ll surface events you\u2019ll actually love \u2014 powered by Claude and licensed event data.'}</Text>
+            <Text style={s.pBig}>{'Tell us a bit about you. We’ll surface events you’ll actually love — powered by Claude and licensed event data.'}</Text>
             <View style={{height:18}}/>
             <Text style={s.pSm}>Takes about 90 seconds. You can change anything later.</Text>
+            <View style={{height:18}}/>
+            <GhostBtn label="Skip for now — browse events" onPress={skip}/>
+            <Text style={[s.pSm,{marginTop:8}]}>No sign-up required. You can explore without entering any details.</Text>
           </>)}
           {step === 1 && (<>
             <Text style={s.h1}>You</Text>
@@ -107,4 +114,3 @@ export function Onboarding({ onDone }: { onDone: (p: Profile) => void }){
     </SafeAreaView>
   );
 }
-
