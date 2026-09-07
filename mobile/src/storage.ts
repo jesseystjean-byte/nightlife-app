@@ -87,3 +87,30 @@ export async function ensureIdentity(profile?: any){
   } catch {}
   return { userId, code: stored.code };
 }
+
+
+// ---- Account / data deletion (App Store Guideline 5.1.1(v)) ---------------------------------
+// The app has no password login, but it does keep on-device data and — once the user has used
+// Friends — a lightweight server record (name/city/vibes + invite code) in the backend KV store.
+// deleteMyData() removes BOTH: it asks the backend to delete the server record, then wipes every
+// local key so nothing personal remains on the device. Called from Settings/Edit profile.
+const ALL_LOCAL_KEYS = [
+  PROFILE_KEY, SAVED_KEY, PASSED_KEY, FRIENDS_KEY, IMPORTED_KEY,
+  USER_KEY, SAVED_EVS_KEY, PASSED_EVS_KEY,
+];
+
+export async function deleteMyData(): Promise<void> {
+  // 1) Delete server-side record if this device ever registered with Friends.
+  try {
+    const st = await getStoredUser();
+    if (st?.userId) {
+      await fetch(API_BASE + '/api/friends', {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ action: 'deleteAccount', userId: st.userId, secret: st.secret }),
+      });
+    }
+  } catch {}
+  // 2) Wipe all local data. multiRemove first, then a clear() as a belt-and-suspenders fallback.
+  try { await AsyncStorage.multiRemove(ALL_LOCAL_KEYS); } catch {}
+  try { await AsyncStorage.clear(); } catch {}
+}
