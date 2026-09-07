@@ -9,10 +9,11 @@
 //   action 'addFriend' { userId, code }                      -> { ok, friend }
 //   action 'setPlan'   { userId, plan?, going? }             -> { ok, user }
 //   action 'list'      { userId }                            -> { friends: [...] }
+//   action 'deleteAccount' { userId }                        -> { ok }   (removes user, code, friend links)
 //
 // KV keys:  user:{userId} -> profile   |  code:{CODE} -> userId  |  friends:{userId} -> [userId]
 
-import { kvGet, kvSet, kvEnabled, rateLimitOk, clientIp } from './_store';
+import { kvGet, kvSet, kvDel, kvEnabled, rateLimitOk, clientIp } from './_store';
 import { createHash } from 'crypto';
 
 const sha256 = (x: string) => createHash('sha256').update(x).digest('hex');
@@ -107,6 +108,24 @@ export default async function handler(req: any, res: any){
         if (u) friends.push(publicUser(u));
       }
       res.status(200).json({ friends });
+      return;
+    }
+
+    if (action === 'deleteAccount') {
+      // App Store Guideline 5.1.1(v): user-initiated deletion of their account/data.
+      // Remove this user's profile, free their invite code, drop the friends edge list,
+      // and remove them from every friend's list so no residual data remains.
+      const meNow = await kvGet<User>(`user:${userId}`);
+      const myFriends = (await kvGet<string[]>(`friends:${userId}`)) || [];
+      for (const fid of myFriends) {
+        const theirs = (await kvGet<string[]>(`friends:${fid}`)) || [];
+        const pruned = theirs.filter(x => x !== userId);
+        if (pruned.length !== theirs.length) await kvSet(`friends:${fid}`, pruned);
+      }
+      const keys = [`user:${userId}`, `friends:${userId}`];
+      if (meNow?.code) keys.push(`code:${meNow.code}`);
+      await kvDel(...keys);
+      res.status(200).json({ ok: true });
       return;
     }
 
